@@ -36,6 +36,8 @@ def save_to_scrapbox(url, context=''):
     lines.append('from : Discord')
 
     payload = {'pages': [{'title': title, 'lines': lines}]}
+    print(f'[scrapbox] POST project={SCRAPBOX_PROJECT} title={title!r}')
+    print(f'[scrapbox] SID={SCRAPBOX_SID[:10]}...(len={len(SCRAPBOX_SID)})')
     r = requests.post(
         f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}',
         json=payload,
@@ -44,7 +46,8 @@ def save_to_scrapbox(url, context=''):
             'Content-Type': 'application/json',
         },
     )
-    print(f'[scrapbox] {r.status_code} {title}')
+    print(f'[scrapbox] status={r.status_code}')
+    print(f'[scrapbox] body={r.text[:300]}')
     return r.status_code
 
 
