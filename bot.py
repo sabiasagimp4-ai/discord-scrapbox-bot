@@ -38,7 +38,7 @@ def save_to_scrapbox(url, context=''):
 
     payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
     r = requests.post(
-        f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}',
+        f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}.json',
         files={'import-file': ('pages.json', payload, 'application/json')},
         headers={
             'Cookie': f'connect.sid={SCRAPBOX_SID}',
