@@ -55,14 +55,18 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+    print(f'[msg] ch={message.channel.id} author={message.author} content={message.content[:50]!r}')
     if message.author.bot:
         return
     if message.channel.id != CHANNEL_ID:
+        print(f'[skip] channel mismatch: {message.channel.id} != {CHANNEL_ID}')
         return
     if KEYWORD and KEYWORD not in message.content:
+        print(f'[skip] keyword not found: {KEYWORD!r}')
         return
 
     urls = re.findall(r'https?://[^\s<>"]+', message.content)
+    print(f'[urls] {urls}')
     for url in urls:
         save_to_scrapbox(url, message.content)
 
