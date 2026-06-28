@@ -36,8 +36,6 @@ def save_to_scrapbox(url, context=''):
     lines.append('from : Discord')
 
     payload = {'pages': [{'title': title, 'lines': lines}]}
-    print(f'[scrapbox] POST project={SCRAPBOX_PROJECT} title={title!r}')
-    print(f'[scrapbox] SID={SCRAPBOX_SID[:10]}...(len={len(SCRAPBOX_SID)})')
     r = requests.post(
         f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}',
         json=payload,
@@ -46,9 +44,7 @@ def save_to_scrapbox(url, context=''):
             'Content-Type': 'application/json',
         },
     )
-    print(f'[scrapbox] status={r.status_code}')
-    print(f'[scrapbox] body={r.text[:300]}')
-    return r.status_code
+    return r.status_code, r.text[:300]
 
 
 @client.event
@@ -74,8 +70,12 @@ async def on_message(message):
         await message.reply('URLが見つかりませんでした')
         return
     for url in urls:
-        status = save_to_scrapbox(url, message.content)
-        await message.reply(f'{"✅ 保存しました" if status == 200 else f"❌ エラー({status})"}: {url}')
+        status, body = save_to_scrapbox(url, message.content)
+        if status == 200:
+            await message.reply(f'✅ 保存しました: {url}')
+        else:
+            sid_hint = f'SID先頭10文字: `{SCRAPBOX_SID[:10]}` 長さ: {len(SCRAPBOX_SID)}'
+            await message.reply(f'❌ エラー({status})\nbody: `{body}`\n{sid_hint}')
 
 
 class HealthHandler(BaseHTTPRequestHandler):
