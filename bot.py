@@ -67,8 +67,12 @@ async def on_message(message):
 
     urls = re.findall(r'https?://[^\s<>"]+', message.content)
     print(f'[urls] {urls}')
+    if not urls:
+        await message.reply('URLが見つかりませんでした')
+        return
     for url in urls:
-        save_to_scrapbox(url, message.content)
+        status = save_to_scrapbox(url, message.content)
+        await message.reply(f'{"✅ 保存しました" if status == 200 else f"❌ エラー({status})"}: {url}')
 
 
 class HealthHandler(BaseHTTPRequestHandler):
