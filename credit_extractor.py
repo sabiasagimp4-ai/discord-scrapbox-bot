@@ -5,7 +5,7 @@ import re
 import requests
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-4o-mini')
+OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-oss-120b:free')
 
 _PROMPT = """以下は動画の説明欄です。クレジット情報（役職と人物名のペア）を抽出してください。
 該当する情報が無ければ空配列にしてください。

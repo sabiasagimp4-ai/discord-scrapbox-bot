@@ -84,7 +84,7 @@ YouTubeはoEmbedにdescriptionが含まれないため、Data API v3に切り替
 ```
 
 **LLM呼び出し先:** OpenRouter Chat Completions API（`https://openrouter.ai/api/v1/chat/completions`）。既存の `requests` 依存のみで実装し、新規SDKは追加しない。
-新規環境変数: `OPENROUTER_API_KEY`、`OPENROUTER_MODEL`（デフォルト: `openai/gpt-4o-mini`）
+新規環境変数: `OPENROUTER_API_KEY`、`OPENROUTER_MODEL`（デフォルト: `openai/gpt-oss-120b:free`）
 
 クレジットが0件の場合は本処理をスキップし、従来通りタイトル+URLのみのページを作成する（後方互換）。
 
