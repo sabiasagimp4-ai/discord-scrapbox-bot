@@ -35,8 +35,24 @@ def _normalize_title(title):
     return re.sub(r'\s+', ' ', title).strip()
 
 
+def _extract_og_image(html):
+    match = re.search(
+        r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    match = re.search(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+        html,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else ''
+
+
 def fetch_metadata(url):
-    """戻り値: {'title': str, 'description': str}"""
+    """戻り値: {'title': str, 'description': str, 'thumbnail': str}"""
     yt_match = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
     if yt_match:
         video_id = yt_match.group(1)
@@ -52,7 +68,11 @@ def fetch_metadata(url):
                 items = r.json().get('items', [])
                 if items:
                     snippet = items[0]['snippet']
-                    return {'title': _normalize_title(snippet.get('title', '')), 'description': snippet.get('description', '')}
+                    return {
+                        'title': _normalize_title(snippet.get('title', '')),
+                        'description': snippet.get('description', ''),
+                        'thumbnail': '',
+                    }
             except Exception:
                 pass
 
@@ -63,7 +83,7 @@ def fetch_metadata(url):
                 timeout=5,
             )
             if r.status_code == 200:
-                return {'title': _normalize_title(r.json().get('title', '')), 'description': ''}
+                return {'title': _normalize_title(r.json().get('title', '')), 'description': '', 'thumbnail': ''}
         except Exception:
             pass
 
@@ -76,11 +96,15 @@ def fetch_metadata(url):
             )
             if r.status_code == 200:
                 data = r.json()
-                return {'title': _normalize_title(data.get('title', '')), 'description': data.get('description', '')}
+                return {
+                    'title': _normalize_title(data.get('title', '')),
+                    'description': data.get('description', ''),
+                    'thumbnail': '',
+                }
         except Exception:
             pass
 
-    # 汎用HTMLタイトル取得
+    # 汎用HTMLタイトル取得（X/Twitterはog:imageもサムネイルとして取得）
     try:
         r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
         match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
@@ -89,11 +113,14 @@ def fetch_metadata(url):
             title = re.sub(r'https?://\S+', '', title).strip()
             title = _normalize_title(title)
             if title:
-                return {'title': title, 'description': ''}
+                thumbnail = ''
+                if 'twitter.com' in url or 'x.com' in url:
+                    thumbnail = _extract_og_image(r.text)
+                return {'title': title, 'description': '', 'thumbnail': thumbnail}
     except Exception:
         pass
 
-    return {'title': urlparse(url).netloc, 'description': ''}
+    return {'title': urlparse(url).netloc, 'description': '', 'thumbnail': ''}
 
 
 def get_existing_pages():
@@ -119,6 +146,9 @@ def save_to_scrapbox(url):
         return 'duplicate', None, title
 
     lines = [title, f'[{url}]']
+
+    if metadata.get('thumbnail'):
+        lines.append(f'[{metadata["thumbnail"]}]')
 
     credits = credit_extractor.extract_credits(metadata['description'])
     if credits:

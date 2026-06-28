@@ -36,7 +36,10 @@ https://scrapbox.io/myproject/動画タイトル
 |---|---|
 | YouTube | `YOUTUBE_API_KEY` 設定時はYouTube Data API v3（説明欄も取得可）、未設定時はoEmbed API（タイトルのみ） |
 | Vimeo | oEmbed API（タイトル・説明欄とも取得可） |
+| Twitter(X) | HTMLの `<title>` タグ＋ `og:image` メタタグ（サムネイル画像として埋め込み） |
 | その他 | HTMLの `<title>` タグをスクレイピング |
+
+タイトルの改行・連続空白は1スペースに正規化されます（Scrapboxのページタイトルは複数行不可のため）。
 
 ---
 
@@ -134,7 +137,7 @@ discord-scrapbox-bot/
  Illustration: [鈴木花子]
 ```
 
-YouTube・Vimeoは動画プレイヤーとして埋め込まれます。クレジット行はLLMが説明欄から抽出できた場合のみ追加されます。
+YouTube・Vimeoは動画プレイヤーとして埋め込まれます。Twitter(X)は `og:image` から取得したサムネイル画像をURL行の直後に埋め込みます。クレジット行はLLMが説明欄から抽出できた場合のみ追加されます。
 
 ---
 
