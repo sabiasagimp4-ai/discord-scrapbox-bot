@@ -2,14 +2,10 @@ import json
 import os
 import re
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
+import requests
 
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=5.0) if (anthropic and ANTHROPIC_API_KEY) else None
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-4o-mini')
 
 _PROMPT = """以下は動画の説明欄です。クレジット情報（役職と人物名のペア）を抽出してください。
 該当する情報が無ければ空配列にしてください。
@@ -24,15 +20,19 @@ _PROMPT = """以下は動画の説明欄です。クレジット情報（役職�
 
 
 def extract_credits(description):
-    if not _client or not description:
+    if not OPENROUTER_API_KEY or not description:
         return []
     try:
-        message = _client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=1024,
-            messages=[{'role': 'user', 'content': _PROMPT.format(description=description[:4000])}],
+        r = requests.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
+            json={
+                'model': OPENROUTER_MODEL,
+                'messages': [{'role': 'user', 'content': _PROMPT.format(description=description[:4000])}],
+            },
+            timeout=5,
         )
-        text = message.content[0].text
+        text = r.json()['choices'][0]['message']['content']
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if not match:
             return []

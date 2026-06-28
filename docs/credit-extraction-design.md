@@ -83,8 +83,8 @@ YouTubeはoEmbedにdescriptionが含まれないため、Data API v3に切り替
 {"credits": [{"role": "Direction", "name": "山田太郎"}, {"role": "Illustration", "name": "鈴木花子"}]}
 ```
 
-**LLM呼び出し先:** Anthropic Messages API（Claude）を想定。既存依存に `anthropic` SDKを追加。
-新規環境変数: `ANTHROPIC_API_KEY`
+**LLM呼び出し先:** OpenRouter Chat Completions API（`https://openrouter.ai/api/v1/chat/completions`）。既存の `requests` 依存のみで実装し、新規SDKは追加しない。
+新規環境変数: `OPENROUTER_API_KEY`、`OPENROUTER_MODEL`（デフォルト: `openai/gpt-4o-mini`）
 
 クレジットが0件の場合は本処理をスキップし、従来通りタイトル+URLのみのページを作成する（後方互換）。
 
@@ -138,7 +138,7 @@ YouTubeはoEmbedにdescriptionが含まれないため、Data API v3に切り替
 
 - `bot.py`: `fetch_title` → `fetch_metadata` に変更、`save_to_scrapbox` にクレジット処理を追加
 - 新規ファイル: `name_linker.py`、`credit_extractor.py`
-- `requirements.txt`: `anthropic` 追加
+- `requirements.txt`: 変更なし（既存の `requests` で実装）
 - README: 新規環境変数の追記
 
 ## 8. 未決事項
