@@ -54,6 +54,8 @@ def load_alias_map(project, sid, mapping_page_title):
 
 
 def check_page_exists(project, sid, title):
+    # Scrapboxはリンクのみ存在する未作成ページでもステータス200を返すため、
+    # 実際に保存済みかどうかは persistent フィールドで判定する必要がある。
     try:
         r = requests.get(
             f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(title)}',
@@ -62,7 +64,12 @@ def check_page_exists(project, sid, title):
         )
     except Exception:
         return False
-    return r.status_code == 200
+    if r.status_code != 200:
+        return False
+    try:
+        return bool(r.json().get('persistent', False))
+    except Exception:
+        return False
 
 
 def resolve_name(name, pages, alias_map):
