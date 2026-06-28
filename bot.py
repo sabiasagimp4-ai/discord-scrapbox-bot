@@ -4,6 +4,7 @@ import re
 import os
 import threading
 import requests
+import yt_dlp
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
@@ -20,10 +21,20 @@ client = discord.Client(intents=intents)
 
 def fetch_title(url):
     try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info.get('title'):
+                return info['title']
+    except Exception:
+        pass
+    try:
         r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
         match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
         if match:
-            return match.group(1).strip()
+            title = match.group(1).strip()
+            title = re.sub(r'https?://\S+', '', title).strip()
+            if title:
+                return title
     except Exception:
         pass
     return urlparse(url).netloc
