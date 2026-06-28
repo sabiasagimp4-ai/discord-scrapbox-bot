@@ -4,7 +4,6 @@ import re
 import os
 import threading
 import requests
-import yt_dlp
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
@@ -20,13 +19,20 @@ client = discord.Client(intents=intents)
 
 
 def fetch_title(url):
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if info.get('title'):
-                return info['title']
-    except Exception:
-        pass
+    # YouTube oEmbed API (no auth needed)
+    yt_match = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
+    if yt_match:
+        try:
+            r = requests.get(
+                f'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={yt_match.group(1)}&format=json',
+                timeout=5,
+            )
+            if r.status_code == 200:
+                return r.json().get('title', '')
+        except Exception:
+            pass
+
+    # 汎用HTMLタイトル取得
     try:
         r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
         match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
@@ -37,6 +43,7 @@ def fetch_title(url):
                 return title
     except Exception:
         pass
+
     return urlparse(url).netloc
 
 
