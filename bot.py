@@ -42,6 +42,8 @@ def save_to_scrapbox(url, context=''):
         headers={
             'Cookie': f'connect.sid={SCRAPBOX_SID}',
             'Content-Type': 'application/json',
+            'Origin': 'https://scrapbox.io',
+            'Referer': 'https://scrapbox.io',
         },
     )
     return r.status_code, r.text[:300]
