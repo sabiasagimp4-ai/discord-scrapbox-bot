@@ -1,0 +1,4 @@
+app = "discord-scrapbox-bot"
+primary_region = "nrt"
+
+[build]
