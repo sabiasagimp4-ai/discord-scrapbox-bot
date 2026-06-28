@@ -32,6 +32,18 @@ def fetch_title(url):
         except Exception:
             pass
 
+    # Vimeo oEmbed API
+    if 'vimeo.com' in url:
+        try:
+            r = requests.get(
+                f'https://vimeo.com/api/oembed.json?url={url}',
+                timeout=5,
+            )
+            if r.status_code == 200:
+                return r.json().get('title', '')
+        except Exception:
+            pass
+
     # 汎用HTMLタイトル取得
     try:
         r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
