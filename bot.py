@@ -30,6 +30,11 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
 
+def _normalize_title(title):
+    """Scrapboxのタイトルは改行を含められないため、空白類を1スペースに畳む"""
+    return re.sub(r'\s+', ' ', title).strip()
+
+
 def fetch_metadata(url):
     """戻り値: {'title': str, 'description': str}"""
     yt_match = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
@@ -47,7 +52,7 @@ def fetch_metadata(url):
                 items = r.json().get('items', [])
                 if items:
                     snippet = items[0]['snippet']
-                    return {'title': snippet.get('title', ''), 'description': snippet.get('description', '')}
+                    return {'title': _normalize_title(snippet.get('title', '')), 'description': snippet.get('description', '')}
             except Exception:
                 pass
 
@@ -58,7 +63,7 @@ def fetch_metadata(url):
                 timeout=5,
             )
             if r.status_code == 200:
-                return {'title': r.json().get('title', ''), 'description': ''}
+                return {'title': _normalize_title(r.json().get('title', '')), 'description': ''}
         except Exception:
             pass
 
@@ -71,7 +76,7 @@ def fetch_metadata(url):
             )
             if r.status_code == 200:
                 data = r.json()
-                return {'title': data.get('title', ''), 'description': data.get('description', '')}
+                return {'title': _normalize_title(data.get('title', '')), 'description': data.get('description', '')}
         except Exception:
             pass
 
@@ -82,6 +87,7 @@ def fetch_metadata(url):
         if match:
             title = match.group(1).strip()
             title = re.sub(r'https?://\S+', '', title).strip()
+            title = _normalize_title(title)
             if title:
                 return {'title': title, 'description': ''}
     except Exception:
