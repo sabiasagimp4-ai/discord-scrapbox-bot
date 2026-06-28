@@ -3,36 +3,64 @@ import json
 import re
 import os
 import threading
+import time
 import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
+
+import credit_extractor
+import name_linker
 
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 KEYWORD = os.environ.get('KEYWORD', '')
 SCRAPBOX_PROJECT = os.environ['SCRAPBOX_PROJECT']
 SCRAPBOX_SID = os.environ['SCRAPBOX_SID']
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+CREDIT_MAPPING_PAGE = os.environ.get('CREDIT_MAPPING_PAGE', '')
+
+PAGES_CACHE_TTL = 300
+_pages_cache = {'pages': [], 'ts': 0.0}
+_alias_map_cache = None
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
 
-def fetch_title(url):
-    # YouTube oEmbed API (no auth needed)
+def fetch_metadata(url):
+    """戻り値: {'title': str, 'description': str}"""
     yt_match = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
     if yt_match:
+        video_id = yt_match.group(1)
+
+        # YouTube Data API v3（description取得に必要、APIキーが未設定ならスキップ）
+        if YOUTUBE_API_KEY:
+            try:
+                r = requests.get(
+                    'https://www.googleapis.com/youtube/v3/videos',
+                    params={'part': 'snippet', 'id': video_id, 'key': YOUTUBE_API_KEY},
+                    timeout=5,
+                )
+                items = r.json().get('items', [])
+                if items:
+                    snippet = items[0]['snippet']
+                    return {'title': snippet.get('title', ''), 'description': snippet.get('description', '')}
+            except Exception:
+                pass
+
+        # YouTube oEmbed API（フォールバック、認証不要だがdescriptionは取得不可）
         try:
             r = requests.get(
-                f'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={yt_match.group(1)}&format=json',
+                f'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json',
                 timeout=5,
             )
             if r.status_code == 200:
-                return r.json().get('title', '')
+                return {'title': r.json().get('title', ''), 'description': ''}
         except Exception:
             pass
 
-    # Vimeo oEmbed API
+    # Vimeo oEmbed API（descriptionも取得できる）
     if 'vimeo.com' in url:
         try:
             r = requests.get(
@@ -40,7 +68,8 @@ def fetch_title(url):
                 timeout=5,
             )
             if r.status_code == 200:
-                return r.json().get('title', '')
+                data = r.json()
+                return {'title': data.get('title', ''), 'description': data.get('description', '')}
         except Exception:
             pass
 
@@ -52,16 +81,45 @@ def fetch_title(url):
             title = match.group(1).strip()
             title = re.sub(r'https?://\S+', '', title).strip()
             if title:
-                return title
+                return {'title': title, 'description': ''}
     except Exception:
         pass
 
-    return urlparse(url).netloc
+    return {'title': urlparse(url).netloc, 'description': ''}
+
+
+def get_existing_pages():
+    now = time.time()
+    if now - _pages_cache['ts'] > PAGES_CACHE_TTL:
+        _pages_cache['pages'] = name_linker.load_existing_pages(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        _pages_cache['ts'] = now
+    return _pages_cache['pages']
+
+
+def get_alias_map():
+    global _alias_map_cache
+    if _alias_map_cache is None:
+        _alias_map_cache = name_linker.load_alias_map(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE)
+    return _alias_map_cache
 
 
 def save_to_scrapbox(url):
-    title = fetch_title(url)
+    metadata = fetch_metadata(url)
+    title = metadata['title']
+
+    if name_linker.check_page_exists(SCRAPBOX_PROJECT, SCRAPBOX_SID, title):
+        return 'duplicate', None, title
+
     lines = [title, f'[{url}]']
+
+    credits = credit_extractor.extract_credits(metadata['description'])
+    if credits:
+        pages = get_existing_pages()
+        alias_map = get_alias_map()
+        lines.append('クレジット')
+        for c in credits:
+            resolved = name_linker.resolve_name(c['name'], pages, alias_map)
+            lines.append(f" {c['role']}: {resolved}")
 
     payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
     r = requests.post(
@@ -100,8 +158,10 @@ async def on_message(message):
         return
     for url in urls:
         status, body, title = save_to_scrapbox(url)
-        if status == 200:
-            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+        scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+        if status == 'duplicate':
+            await message.reply(f'既に保存済みです {scrapbox_url}')
+        elif status == 200:
             await message.reply(f'保存しました {scrapbox_url}')
         else:
             await message.reply(f'❌ エラー({status}): {body}')
