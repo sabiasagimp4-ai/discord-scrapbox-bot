@@ -59,7 +59,7 @@ def fetch_title(url):
     return urlparse(url).netloc
 
 
-def save_to_scrapbox(url, context=''):
+def save_to_scrapbox(url):
     title = fetch_title(url)
     lines = [title, f'[{url}]']
 
@@ -73,7 +73,7 @@ def save_to_scrapbox(url, context=''):
             'Referer': 'https://scrapbox.io',
         },
     )
-    return r.status_code, r.text[:300]
+    return r.status_code, r.text[:300], title
 
 
 @client.event
@@ -99,12 +99,12 @@ async def on_message(message):
         await message.reply('URLが見つかりませんでした')
         return
     for url in urls:
-        status, body = save_to_scrapbox(url, message.content)
+        status, body, title = save_to_scrapbox(url)
         if status == 200:
-            await message.reply(f'✅ 保存しました: {url}')
+            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+            await message.reply(f'保存しました {scrapbox_url}')
         else:
-            sid_hint = f'SID先頭10文字: `{SCRAPBOX_SID[:10]}` 長さ: {len(SCRAPBOX_SID)}'
-            await message.reply(f'❌ エラー({status})\nbody: `{body}`\n{sid_hint}')
+            await message.reply(f'❌ エラー({status}): {body}')
 
 
 class HealthHandler(BaseHTTPRequestHandler):
