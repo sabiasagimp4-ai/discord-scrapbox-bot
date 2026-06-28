@@ -1,4 +1,5 @@
 import discord
+import json
 import re
 import os
 import threading
@@ -35,13 +36,12 @@ def save_to_scrapbox(url, context=''):
         lines.append(f'> {context[:200]}')
     lines.append('from : Discord')
 
-    payload = {'pages': [{'title': title, 'lines': lines}]}
+    payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
     r = requests.post(
         f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}',
-        json=payload,
+        files={'import-file': ('pages.json', payload, 'application/json')},
         headers={
             'Cookie': f'connect.sid={SCRAPBOX_SID}',
-            'Content-Type': 'application/json',
             'Origin': 'https://scrapbox.io',
             'Referer': 'https://scrapbox.io',
         },
