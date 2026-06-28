@@ -6,6 +6,8 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 
 ## 動作の流れ
 
+### 自動保存（メッセージ監視）
+
 1. 指定チャンネルに `{キーワード} {URL}` を含むメッセージを送信
 2. BotがURLを検出し、タイトルを取得
 3. ScrapboxにページをImport API経由で作成
@@ -14,6 +16,16 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 ```
 [ユーザー] 保存 https://youtu.be/xxxxxx
 [Bot]      保存しました https://scrapbox.io/myproject/動画タイトル
+```
+
+### `/save` スラッシュコマンド
+
+指定チャンネルで `/save url:https://youtu.be/xxxxxx` を実行すると、キーワード不要で同じ保存処理が走ります。返信は次の3行形式です。
+
+```
+実行者名
+https://youtu.be/xxxxxx
+https://scrapbox.io/myproject/動画タイトル
 ```
 
 ---
@@ -46,9 +58,11 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 2. 左メニュー「Bot」→「Add Bot」
 3. **Message Content Intent** をON
 4. トークンをコピー
-5. OAuth2 → URL Generator → Scopes: `bot`、Permissions: `Read Messages` + `Send Messages` → URLでサーバーに招待
+5. OAuth2 → URL Generator → Scopes: `bot` + `applications.commands`、Permissions: `Read Messages` + `Send Messages` → URLでサーバーに招待（`/save`コマンドを使うには `applications.commands` スコープが必須）
 
 チャンネルIDはDiscordの設定 → 詳細設定 → **開発者モード** をONにして、チャンネルを右クリック → **IDをコピー** で取得。
+
+> スラッシュコマンドはDiscordの仕様上グローバル反映に最大1時間ほどかかります。動作確認を早く行いたい場合は環境変数 `GUILD_ID`（サーバーID）を設定すると、そのサーバーには即時反映されます。
 
 ### 2. Render.comにデプロイ
 
@@ -84,6 +98,7 @@ Render → Environment から設定します。
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
 | `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `openai/gpt-oss-120b:free`） | `google/gemini-flash-1.5` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
+| `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |
 
 ### connect.sid の取得方法
 

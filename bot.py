@@ -18,6 +18,7 @@ SCRAPBOX_PROJECT = os.environ['SCRAPBOX_PROJECT']
 SCRAPBOX_SID = os.environ['SCRAPBOX_SID']
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 CREDIT_MAPPING_PAGE = os.environ.get('CREDIT_MAPPING_PAGE', '')
+GUILD_ID = os.environ.get('GUILD_ID', '')
 
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
@@ -26,6 +27,7 @@ _alias_map_cache = None
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+tree = discord.app_commands.CommandTree(client)
 
 
 def fetch_metadata(url):
@@ -137,6 +139,31 @@ def save_to_scrapbox(url):
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
+    if GUILD_ID:
+        guild = discord.Object(id=int(GUILD_ID))
+        tree.copy_global_to(guild=guild)
+        await tree.sync(guild=guild)
+    else:
+        await tree.sync()
+
+
+@tree.command(name='save', description='URLをScrapboxに保存します')
+@discord.app_commands.describe(url='保存したいURL')
+async def save_command(interaction: discord.Interaction, url: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    status, body, title = save_to_scrapbox(url)
+    scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+
+    if status == 'duplicate':
+        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n既に保存済みです {scrapbox_url}')
+    elif status == 200:
+        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n{scrapbox_url}')
+    else:
+        await interaction.followup.send(f'❌ エラー({status}): {body}')
 
 
 @client.event
