@@ -50,9 +50,6 @@ def fetch_title(url):
 def save_to_scrapbox(url, context=''):
     title = fetch_title(url)
     lines = [title, f'[{url}]']
-    if context:
-        lines.append(f'> {context[:200]}')
-    lines.append('from : Discord')
 
     payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
     r = requests.post(
