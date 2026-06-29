@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import credit_extractor
 import gyazo_uploader
 import name_linker
+import playlist_loader
 
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
@@ -211,6 +212,37 @@ def _format_error_reply(status, body):
     return f'❌ エラー({status}): {body}'
 
 
+def expand_urls(urls):
+    """プレイリストURLを動画URLの並びに展開する。展開後・展開不要なURLを通して重複を除いたリストを返す"""
+    expanded = []
+    seen = set()
+    for url in urls:
+        playlist_id = playlist_loader.extract_playlist_id(url)
+        video_urls = playlist_loader.fetch_playlist_video_urls(playlist_id, YOUTUBE_API_KEY) if playlist_id else []
+        for u in (video_urls or [url]):
+            if u not in seen:
+                seen.add(u)
+                expanded.append(u)
+    return expanded
+
+
+def process_urls(urls, overwrite=False):
+    """各URLを保存し、(エラーメッセージのリスト, Embedのリスト) を返す"""
+    results = []
+    embeds = []
+    for url in urls:
+        status, body, title, thumbnail = save_to_scrapbox(url, overwrite=overwrite)
+        scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+        if status == 'duplicate':
+            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue()))
+        elif status == 200:
+            description = '上書き保存しました' if overwrite else '保存しました'
+            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, description, discord.Color.green()))
+        else:
+            results.append(_format_error_reply(status, body))
+    return results, embeds
+
+
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
@@ -230,19 +262,14 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
         return
 
     await interaction.response.defer()
-    status, body, title, thumbnail = save_to_scrapbox(url, overwrite=overwrite)
-    scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+    urls = expand_urls([url])
+    results, embeds = process_urls(urls, overwrite=overwrite)
     content = f'{interaction.user.display_name}\n{url}'
 
-    if status == 'duplicate':
-        embed = _build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue())
-        await interaction.followup.send(content=content, embed=embed)
-    elif status == 200:
-        description = '上書き保存しました' if overwrite else '保存しました'
-        embed = _build_result_embed(title, scrapbox_url, thumbnail, description, discord.Color.green())
-        await interaction.followup.send(content=content, embed=embed)
-    else:
-        await interaction.followup.send(_format_error_reply(status, body))
+    if embeds:
+        await interaction.followup.send(content=content, embeds=embeds[:10])
+    if results:
+        await interaction.followup.send('\n'.join(results))
 
 
 @tree.command(name='status', description='Bot・Scrapbox・外部APIの疎通状況を確認します')
@@ -348,22 +375,12 @@ async def on_message(message):
         print(f'[skip] keyword not found: {KEYWORD!r}')
         return
 
-    urls = re.findall(r'https?://[^\s<>"]+', message.content)
+    urls = expand_urls(re.findall(r'https?://[^\s<>"]+', message.content))
     print(f'[urls] {urls}')
     if not urls:
         await message.reply('URLが見つかりませんでした')
         return
-    results = []
-    embeds = []
-    for url in urls:
-        status, body, title, thumbnail = save_to_scrapbox(url)
-        scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
-        if status == 'duplicate':
-            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue()))
-        elif status == 200:
-            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '保存しました', discord.Color.green()))
-        else:
-            results.append(_format_error_reply(status, body))
+    results, embeds = process_urls(urls)
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
 
 
