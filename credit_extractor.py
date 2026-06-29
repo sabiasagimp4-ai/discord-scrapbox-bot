@@ -1,22 +1,26 @@
-import json
 import os
 import re
 
 import requests
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-oss-120b:free')
+OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-oss-20b:free')
 
-_PROMPT = """以下は動画の説明欄です。クレジット情報（役職と人物名のペア）を抽出してください。
-該当する情報が無ければ空配列にしてください。
-出力は次のJSON形式のみとし、他のテキストやコードブロック記法は含めないでください。
-{{"credits": [{{"role": "役職", "name": "人物名"}}]}}
-
-説明欄:
----
-{description}
----
-"""
+_SYSTEM_PROMPT = (
+    'あなたはYouTubeのMV概要欄から映像制作クレジットを抽出する専門家です。\n'
+    '\n'
+    'ルール:\n'
+    '1. 概要欄に実際に書かれているクレジットだけを出力する。書かれていない項目は一切出力しない。\n'
+    '2. 映像・ビジュアル制作の役職のみ対象（Direction, Animation, Illustration, 3DCG, VFX, Movie, Design, Jacket, Visualizer, Lyric Motion, Post Effect, Camera, Edit など）。\n'
+    '3. 音楽制作の役職は除外（Music, Lyric, Compose, Arrange, Vocal, Guitar, Recording, Sound, Mastering, Mix Engineer など）。\n'
+    '4. 役職名は概要欄に書かれた表記をそのまま使う。\n'
+    '5. @usernameやURLは出力しない。\n'
+    '6. 映像クレジットが一つも見つからない場合のみ「なし」と答える。\n'
+    '\n'
+    '出力例（概要欄にDirectionとIllustrationしかなければこの2行だけ出す）:\n'
+    'Direction: 山田太郎\n'
+    'Illustration: 鈴木花子'
+)
 
 
 def check_connection():
@@ -36,6 +40,21 @@ def check_connection():
     return False, f'ステータス({r.status_code})'
 
 
+def _parse_credits(text):
+    credits = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line == 'なし':
+            continue
+        match = re.match(r'^(.+?)[:：]\s*(.+)$', line)
+        if not match:
+            continue
+        role, name = match.group(1).strip(), match.group(2).strip()
+        if role and name:
+            credits.append({'role': role, 'name': name})
+    return credits
+
+
 def extract_credits_debug(description):
     """extract_creditsの内部処理を診断情報付きで実行する。
     戻り値: (credits: list, raw_response: str|None, error: str|None)
@@ -51,7 +70,10 @@ def extract_credits_debug(description):
             headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
             json={
                 'model': OPENROUTER_MODEL,
-                'messages': [{'role': 'user', 'content': _PROMPT.format(description=description[:4000])}],
+                'messages': [
+                    {'role': 'system', 'content': _SYSTEM_PROMPT},
+                    {'role': 'user', 'content': description[:4000]},
+                ],
             },
             timeout=5,
         )
@@ -66,16 +88,7 @@ def extract_credits_debug(description):
     except Exception:
         return [], r.text[:1000], 'レスポンスの形式が想定と異なります'
 
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if not match:
-        return [], text, 'JSON形式の応答が見つかりませんでした'
-
-    try:
-        data = json.loads(match.group(0))
-    except Exception:
-        return [], text, '応答のJSON解析に失敗しました'
-
-    credits = [c for c in data.get('credits', []) if c.get('name') and c.get('role')]
+    credits = _parse_credits(text)
     return credits, text, None
 
 
