@@ -24,6 +24,15 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 
 `overwrite:true` を指定すると、同タイトルのページが既に存在していても上書き保存します（通常は既存ページがあれば新規作成をスキップします）。
 
+### YouTubeプレイリストの一括保存
+
+URLに `list=` パラメータ（再生リストID）が含まれる場合、`YOUTUBE_API_KEY` 設定時は再生リスト内の動画を自動展開し、1件ずつ通常の保存処理を実行します（自動保存・`/save` 両方対応）。
+
+- `YOUTUBE_API_KEY` 未設定時は展開せず、URLをそのまま1件として処理します
+- 1回の展開につき最大50件まで取得します
+- 再生リスト内の重複動画、および同一メッセージ内の重複URLは除外されます（個別の重複保存防止は既存ページ判定で行われます）
+- DiscordのEmbedは1メッセージ最大10件のため、保存件数が10件を超える場合は先頭10件のみ表示されます
+
 ### `/alias` スラッシュコマンド
 
 人物名の表記ゆれ（`CREDIT_MAPPING_PAGE` で指定したScrapboxページ）を管理するコマンドです。
@@ -153,6 +162,7 @@ discord-scrapbox-bot/
 ├── credit_extractor.py         # LLMによるクレジット抽出
 ├── name_linker.py               # Scrapbox人物名リンク照合
 ├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
+├── playlist_loader.py           # YouTube再生リストの動画URL展開
 ├── tests/                       # 単体テスト（unittest）
 ├── .github/workflows/test.yml   # CI（push/PR時に単体テストを自動実行）
 ├── requirements.txt             # 依存パッケージ（discord.py, requests）
