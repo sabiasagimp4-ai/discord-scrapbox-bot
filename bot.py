@@ -54,7 +54,8 @@ def _extract_og_image(html):
 
 
 def fetch_metadata(url):
-    """戻り値: {'title': str, 'description': str, 'thumbnail': str}"""
+    """戻り値: {'title': str, 'description': str, 'thumbnail': str, 'source': str}
+    'source' はどの取得経路を通ったかを示す（デバッグ用）"""
     yt_match = re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
     if yt_match:
         video_id = yt_match.group(1)
@@ -74,6 +75,7 @@ def fetch_metadata(url):
                         'title': _normalize_title(snippet.get('title', '')),
                         'description': snippet.get('description', ''),
                         'thumbnail': '',
+                        'source': 'YouTube Data API',
                     }
             except Exception:
                 pass
@@ -85,7 +87,12 @@ def fetch_metadata(url):
                 timeout=5,
             )
             if r.status_code == 200:
-                return {'title': _normalize_title(r.json().get('title', '')), 'description': '', 'thumbnail': ''}
+                return {
+                    'title': _normalize_title(r.json().get('title', '')),
+                    'description': '',
+                    'thumbnail': '',
+                    'source': 'YouTube oEmbed（概要欄は取得不可）',
+                }
         except Exception:
             pass
 
@@ -102,6 +109,7 @@ def fetch_metadata(url):
                     'title': _normalize_title(data.get('title', '')),
                     'description': data.get('description', ''),
                     'thumbnail': '',
+                    'source': 'Vimeo oEmbed',
                 }
         except Exception:
             pass
@@ -115,11 +123,16 @@ def fetch_metadata(url):
             title = re.sub(r'https?://\S+', '', title).strip()
             title = _normalize_title(title)
             if title:
-                return {'title': title, 'description': '', 'thumbnail': _extract_og_image(r.text)}
+                return {
+                    'title': title,
+                    'description': '',
+                    'thumbnail': _extract_og_image(r.text),
+                    'source': 'HTML <title>（概要欄は取得不可）',
+                }
     except Exception:
         pass
 
-    return {'title': urlparse(url).netloc, 'description': '', 'thumbnail': ''}
+    return {'title': urlparse(url).netloc, 'description': '', 'thumbnail': '', 'source': '取得失敗'}
 
 
 def check_youtube_connection():
@@ -287,6 +300,31 @@ async def status_command(interaction: discord.Interaction):
         _format_status_line('Gyazo', gyazo_uploader.check_connection()),
     ]
     await interaction.followup.send('\n'.join(lines))
+
+
+@tree.command(name='debug', description='URLのメタデータ取得結果（概要欄など）を確認します')
+@discord.app_commands.describe(url='確認したいURL')
+async def debug_command(interaction: discord.Interaction, url: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    metadata = fetch_metadata(url)
+    description = metadata.get('description') or '(概要欄なし、または取得不可)'
+    if len(description) > 1500:
+        description = description[:1500] + '\n...(省略)'
+
+    embed = discord.Embed(
+        title=metadata.get('title') or '(タイトル取得失敗)',
+        description=description,
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name='取得元', value=metadata.get('source', '不明'), inline=False)
+    thumbnail = metadata.get('thumbnail')
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    await interaction.followup.send(embed=embed)
 
 
 alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')
