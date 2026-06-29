@@ -11,7 +11,7 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 1. 指定チャンネルに `{キーワード} {URL}` を含むメッセージを送信
 2. BotがURLを検出し、タイトルを取得
 3. ScrapboxにページをImport API経由で作成
-4. DiscordにScrapboxページのURLをリプライ（複数URLが含まれる場合は1件ずつではなく1通にまとめて返信）
+4. DiscordにScrapboxページのURLをリプライ（複数URLが含まれる場合は1件ずつではなく1通にまとめて返信。サムネイルがある場合はEmbedで表示）
 
 ```
 [ユーザー] 保存 https://youtu.be/xxxxxx
@@ -20,27 +20,22 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 
 ### `/save` スラッシュコマンド
 
-指定チャンネルで `/save url:https://youtu.be/xxxxxx` を実行すると、キーワード不要で同じ保存処理が走ります。返信は次の3行形式です。
-
-```
-実行者名
-https://youtu.be/xxxxxx
-https://scrapbox.io/myproject/動画タイトル
-```
+指定チャンネルで `/save url:https://youtu.be/xxxxxx` を実行すると、キーワード不要で同じ保存処理が走ります。実行者名とURLに続けて、タイトル・サムネイル・Scrapboxページへのリンクを含むEmbedが返信されます。
 
 `overwrite:true` を指定すると、同タイトルのページが既に存在していても上書き保存します（通常は既存ページがあれば新規作成をスキップします）。
 
 ### `/alias` スラッシュコマンド
 
-人物名の表記ゆれ（`CREDIT_MAPPING_PAGE` で指定したScrapboxページ）に別名を追加します。
+人物名の表記ゆれ（`CREDIT_MAPPING_PAGE` で指定したScrapboxページ）を管理するコマンドです。
 
-```
-/alias canonical:山田太郎 alias:タロー
-```
+| サブコマンド | 説明 | 権限 |
+|---|---|---|
+| `/alias add canonical:山田太郎 alias:タロー` | 別名を追加します | サーバーの管理 |
+| `/alias remove canonical:山田太郎 alias:タロー` | 別名を削除します（別名が0件になった本名の行は削除されます） | サーバーの管理 |
+| `/alias list` | 登録済みの表記ゆれ一覧を表示します | 不要 |
 
-- `CREDIT_MAPPING_PAGE` が未設定の場合は実行できません
-- 実行には「サーバーの管理」権限が必要です
-- 既存の表記ゆれは削除されず、追記のみ行われます（同じ別名が既に登録済みの場合は何もせず通知します）
+- いずれも `CREDIT_MAPPING_PAGE` が未設定の場合は実行できません
+- `add`/`remove` は既存の表記ゆれをむやみに上書きしません（`add` は同じ別名が登録済みなら何もせず通知、`remove` は未登録の本名・別名を指定するとエラーを返します）
 
 ---
 
@@ -140,14 +135,15 @@ Render → Environment から設定します。
 
 ```
 discord-scrapbox-bot/
-├── bot.py               # メインロジック
-├── credit_extractor.py  # LLMによるクレジット抽出
-├── name_linker.py       # Scrapbox人物名リンク照合
-├── gyazo_uploader.py    # サムネイル画像のGyazoアップロード
-├── tests/                # 単体テスト（unittest）
-├── requirements.txt     # 依存パッケージ（discord.py, requests）
-├── Dockerfile            # コンテナ定義
-└── fly.toml              # 未使用（Fly.io用、Renderでは不要）
+├── bot.py                      # メインロジック
+├── credit_extractor.py         # LLMによるクレジット抽出
+├── name_linker.py               # Scrapbox人物名リンク照合
+├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
+├── tests/                       # 単体テスト（unittest）
+├── .github/workflows/test.yml   # CI（push/PR時に単体テストを自動実行）
+├── requirements.txt             # 依存パッケージ（discord.py, requests）
+├── Dockerfile                    # コンテナ定義
+└── fly.toml                      # 未使用（Fly.io用、Renderでは不要）
 ```
 
 ---
@@ -189,3 +185,5 @@ python bot.py
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+`master` への push・PR作成時にGitHub Actions（`.github/workflows/test.yml`）で自動実行されます。
