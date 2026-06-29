@@ -89,7 +89,7 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 
 ## クレジット抽出・人物名リンク機能（任意）
 
-`YOUTUBE_API_KEY` または Vimeo の説明欄から、LLM（OpenRouter経由）でクレジット情報（役職・人物名）を抽出し、Scrapboxページに追記します。`OPENROUTER_API_KEY` が未設定の場合はこの処理をスキップし、タイトル＋URLのみのページを作成します。
+`YOUTUBE_API_KEY` または Vimeo の説明欄から、LLM（OpenRouter経由）で映像・ビジュアル制作のクレジット情報（役職・人物名）を抽出し、Scrapboxページに追記します。Direction・Animation・Illustration・3DCGなどの映像制作系の役職のみが対象で、Music・Vocal・Recordingなどの音楽制作系の役職は除外されます。`OPENROUTER_API_KEY` が未設定の場合はこの処理をスキップし、タイトル＋URLのみのページを作成します。
 
 抽出した人物名は既存のScrapboxページと照合し、一致すれば `[名前]` 形式でリンク化されます（完全一致 → `CREDIT_MAPPING_PAGE` のエイリアス → 文字列の類似度0.9以上の順）。
 
@@ -143,7 +143,7 @@ Render → Environment から設定します。
 | `KEYWORD` | — | 絞り込みキーワード（空で全メッセージ対象） | `保存` |
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3キー。設定するとYouTubeの説明欄を取得しクレジット抽出が有効になる | `AIza...` |
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
-| `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `openai/gpt-oss-120b:free`） | `google/gemini-flash-1.5` |
+| `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `openai/gpt-oss-20b:free`） | `google/gemini-flash-1.5` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
 | `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |
 | `GYAZO_ACCESS_TOKEN` | — | サムネイル画像をGyazoにアップロードし直すためのアクセストークン。未設定時は取得した画像URLを直接埋め込む | `xxxxxxxx-xxxx-...` |

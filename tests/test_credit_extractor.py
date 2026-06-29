@@ -34,30 +34,34 @@ class ExtractCreditsTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_successful_extraction_parses_credits(self):
-        content = '{"credits": [{"role": "Direction", "name": "山田太郎"}]}'
+        content = 'Direction: 山田太郎\nIllustration: 鈴木花子'
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
             with patch('credit_extractor.requests.post', return_value=_openrouter_response(content)):
                 result = credit_extractor.extract_credits('監督: 山田太郎')
-        self.assertEqual(result, [{'role': 'Direction', 'name': '山田太郎'}])
+        self.assertEqual(
+            result,
+            [{'role': 'Direction', 'name': '山田太郎'}, {'role': 'Illustration', 'name': '鈴木花子'}],
+        )
 
-    def test_credits_missing_name_or_role_are_filtered_out(self):
-        content = '{"credits": [{"role": "Direction"}, {"name": "鈴木花子"}, {"role": "X", "name": "Y"}]}'
+    def test_full_width_colon_is_supported(self):
+        content = 'Direction：山田太郎'
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
             with patch('credit_extractor.requests.post', return_value=_openrouter_response(content)):
                 result = credit_extractor.extract_credits('説明')
-        self.assertEqual(result, [{'role': 'X', 'name': 'Y'}])
+        self.assertEqual(result, [{'role': 'Direction', 'name': '山田太郎'}])
 
-    def test_response_without_json_object_returns_empty_list(self):
+    def test_nashi_response_returns_empty_list(self):
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
-            with patch('credit_extractor.requests.post', return_value=_openrouter_response('no json here')):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response('なし')):
                 result = credit_extractor.extract_credits('説明')
         self.assertEqual(result, [])
 
-    def test_invalid_json_returns_empty_list(self):
+    def test_lines_without_colon_are_ignored(self):
+        content = 'よろしくお願いします\nDirection: 山田太郎'
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
-            with patch('credit_extractor.requests.post', return_value=_openrouter_response('{not valid json}')):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response(content)):
                 result = credit_extractor.extract_credits('説明')
-        self.assertEqual(result, [])
+        self.assertEqual(result, [{'role': 'Direction', 'name': '山田太郎'}])
 
     def test_request_exception_returns_empty_list(self):
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
@@ -86,13 +90,29 @@ class ExtractCreditsDebugTests(unittest.TestCase):
         self.assertEqual(error, '概要欄が空です')
 
     def test_successful_extraction_returns_credits_and_raw_response(self):
-        content = '{"credits": [{"role": "Direction", "name": "山田太郎"}]}'
+        content = 'Direction: 山田太郎'
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
             with patch('credit_extractor.requests.post', return_value=_openrouter_response(content)):
                 credits, raw_response, error = credit_extractor.extract_credits_debug('監督: 山田太郎')
         self.assertEqual(credits, [{'role': 'Direction', 'name': '山田太郎'}])
         self.assertEqual(raw_response, content)
         self.assertIsNone(error)
+
+    def test_nashi_response_returns_empty_credits_without_error(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response('なし')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertEqual(raw_response, 'なし')
+        self.assertIsNone(error)
+
+    def test_system_prompt_and_user_content_are_sent(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response('なし')) as mock_post:
+                credit_extractor.extract_credits_debug('概要欄の本文')
+        sent_messages = mock_post.call_args.kwargs['json']['messages']
+        self.assertEqual(sent_messages[0]['role'], 'system')
+        self.assertEqual(sent_messages[1], {'role': 'user', 'content': '概要欄の本文'})
 
     def test_non_200_status_returns_error_with_body(self):
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
@@ -110,22 +130,6 @@ class ExtractCreditsDebugTests(unittest.TestCase):
         self.assertEqual(credits, [])
         self.assertEqual(raw_response, 'raw body')
         self.assertEqual(error, 'レスポンスの形式が想定と異なります')
-
-    def test_response_without_json_object_returns_error_with_raw_text(self):
-        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
-            with patch('credit_extractor.requests.post', return_value=_openrouter_response('no json here')):
-                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
-        self.assertEqual(credits, [])
-        self.assertEqual(raw_response, 'no json here')
-        self.assertEqual(error, 'JSON形式の応答が見つかりませんでした')
-
-    def test_invalid_json_returns_error_with_raw_text(self):
-        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
-            with patch('credit_extractor.requests.post', return_value=_openrouter_response('{not valid json}')):
-                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
-        self.assertEqual(credits, [])
-        self.assertEqual(raw_response, '{not valid json}')
-        self.assertEqual(error, '応答のJSON解析に失敗しました')
 
     def test_request_exception_returns_error_without_raw_response(self):
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
