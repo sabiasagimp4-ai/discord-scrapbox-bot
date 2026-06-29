@@ -19,6 +19,23 @@ _PROMPT = """以下は動画の説明欄です。クレジット情報（役職�
 """
 
 
+def check_connection():
+    """OpenRouter APIキーの有効性を確認する。戻り値: (ok, message)。未設定時は (None, '未設定')"""
+    if not OPENROUTER_API_KEY:
+        return None, '未設定'
+    try:
+        r = requests.get(
+            'https://openrouter.ai/api/v1/auth/key',
+            headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
+            timeout=5,
+        )
+    except Exception as e:
+        return False, str(e)
+    if r.status_code == 200:
+        return True, '接続OK'
+    return False, f'ステータス({r.status_code})'
+
+
 def extract_credits(description):
     if not OPENROUTER_API_KEY or not description:
         return []

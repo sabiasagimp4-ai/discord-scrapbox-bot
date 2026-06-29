@@ -5,8 +5,9 @@ import credit_extractor
 
 
 class FakeResponse:
-    def __init__(self, json_data):
-        self._json_data = json_data
+    def __init__(self, json_data=None, status_code=200):
+        self._json_data = json_data or {}
+        self.status_code = status_code
 
     def json(self):
         return self._json_data
@@ -62,6 +63,36 @@ class ExtractCreditsTests(unittest.TestCase):
             with patch('credit_extractor.requests.post', side_effect=Exception('timeout')):
                 result = credit_extractor.extract_credits('説明')
         self.assertEqual(result, [])
+
+
+class CheckConnectionTests(unittest.TestCase):
+    def test_no_api_key_returns_none_without_network(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', ''):
+            with patch('credit_extractor.requests.get') as mock_get:
+                ok, message = credit_extractor.check_connection()
+        mock_get.assert_not_called()
+        self.assertIsNone(ok)
+        self.assertEqual(message, '未設定')
+
+    def test_status_200_returns_ok(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.get', return_value=FakeResponse(status_code=200)):
+                ok, message = credit_extractor.check_connection()
+        self.assertTrue(ok)
+        self.assertEqual(message, '接続OK')
+
+    def test_other_status_returns_false(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.get', return_value=FakeResponse(status_code=401)):
+                ok, message = credit_extractor.check_connection()
+        self.assertFalse(ok)
+
+    def test_request_exception_returns_false(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.get', side_effect=Exception('network error')):
+                ok, message = credit_extractor.check_connection()
+        self.assertFalse(ok)
+        self.assertEqual(message, 'network error')
 
 
 if __name__ == '__main__':

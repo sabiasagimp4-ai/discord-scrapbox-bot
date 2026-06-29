@@ -37,6 +37,20 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 - いずれも `CREDIT_MAPPING_PAGE` が未設定の場合は実行できません
 - `add`/`remove` は既存の表記ゆれをむやみに上書きしません（`add` は同じ別名が登録済みなら何もせず通知、`remove` は未登録の本名・別名を指定するとエラーを返します）
 
+### `/status` スラッシュコマンド
+
+Bot本体とBotが依存する各サービスへの疎通状況を確認するコマンドです。指定チャンネルで `/status` を実行すると、以下の項目をまとめて返信します。
+
+| 項目 | 確認内容 |
+|---|---|
+| Discord | Botが応答中であることの確認（常に✅） |
+| Scrapbox | `SCRAPBOX_SID` Cookieでページ一覧を取得できるか |
+| YouTube Data API | `YOUTUBE_API_KEY` の有効性 |
+| OpenRouter(AI) | `OPENROUTER_API_KEY` の有効性 |
+| Gyazo | `GYAZO_ACCESS_TOKEN` の有効性 |
+
+各項目は ✅（正常） / ❌（異常） / ⏭️（未設定のためスキップ）のいずれかで表示されます。`YOUTUBE_API_KEY`・`OPENROUTER_API_KEY`・`GYAZO_ACCESS_TOKEN` は任意設定のため、未設定でも❌にはならず⏭️として扱われます。実行に特別な権限は不要です。
+
 ---
 
 ## タイトル取得ロジック
