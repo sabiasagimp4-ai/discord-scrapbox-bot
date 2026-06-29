@@ -131,6 +131,83 @@ def add_alias(project, sid, mapping_page_title, canonical, alias):
     return r2.status_code, r2.text[:300]
 
 
+def list_aliases(project, sid, mapping_page_title):
+    """表記ゆれページの本文行（タイトル行を除く）をそのままリストで返す"""
+    if not mapping_page_title:
+        return []
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(mapping_page_title)}',
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if r.status_code != 200:
+        return []
+    data = r.json()
+    if not data.get('persistent'):
+        return []
+    lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
+    return [line for line in lines[1:] if line.strip()]
+
+
+def remove_alias(project, sid, mapping_page_title, canonical, alias):
+    """表記ゆれページから指定の別名を削除する。別名が無くなった行は削除する。
+    戻り値: (status_code, message)
+    """
+    canonical = canonical.strip()
+    alias = alias.strip()
+
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(mapping_page_title)}',
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+
+    body_lines = []
+    if r.status_code == 200:
+        data = r.json()
+        if data.get('persistent'):
+            page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
+            body_lines = page_lines[1:]  # 1行目はタイトル行
+
+    for i, text in enumerate(body_lines):
+        line_canonical, sep, aliases_part = text.partition('==')
+        if not sep or line_canonical.strip().lower() != canonical.lower():
+            continue
+        existing_aliases = [a.strip() for a in aliases_part.split(',') if a.strip()]
+        remaining = [a for a in existing_aliases if a.lower() != alias.lower()]
+        if len(remaining) == len(existing_aliases):
+            return 404, '登録されていない別名です'
+        if remaining:
+            body_lines[i] = f'{line_canonical.strip()} == {", ".join(remaining)}'
+        else:
+            body_lines.pop(i)
+        break
+    else:
+        return 404, '登録されていない本名です'
+
+    payload = json.dumps({'pages': [{'title': mapping_page_title, 'lines': [mapping_page_title] + body_lines}]})
+    try:
+        r2 = requests.post(
+            f'https://scrapbox.io/api/page-data/import/{project}.json',
+            files={'import-file': ('pages.json', payload, 'application/json')},
+            headers={
+                'Cookie': f'connect.sid={sid}',
+                'Origin': 'https://scrapbox.io',
+                'Referer': 'https://scrapbox.io',
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+    return r2.status_code, r2.text[:300]
+
+
 def resolve_name(name, pages, alias_map):
     """名前を既存ページと照合し、一致すれば Scrapbox リンク記法 [名前] に変換する"""
     normalized = _normalize(name)

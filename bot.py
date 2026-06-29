@@ -141,14 +141,16 @@ def save_to_scrapbox(url, overwrite=False):
     title = metadata['title']
 
     if not overwrite and name_linker.check_page_exists(SCRAPBOX_PROJECT, SCRAPBOX_SID, title):
-        return 'duplicate', None, title
+        return 'duplicate', None, title, ''
 
     lines = [title, f'[{url}]']
 
     thumbnail = metadata.get('thumbnail')
+    embedded_thumbnail = ''
     if thumbnail:
         # 直リンクはホットリンク制限で表示できないサイトがあるため、Gyazoにアップロードして恒久URL化する
-        lines.append(f'[{gyazo_uploader.upload_thumbnail(thumbnail) or thumbnail}]')
+        embedded_thumbnail = gyazo_uploader.upload_thumbnail(thumbnail) or thumbnail
+        lines.append(f'[{embedded_thumbnail}]')
 
     credits = credit_extractor.extract_credits(metadata['description'])
     if credits:
@@ -169,7 +171,14 @@ def save_to_scrapbox(url, overwrite=False):
             'Referer': 'https://scrapbox.io',
         },
     )
-    return r.status_code, r.text[:300], title
+    return r.status_code, r.text[:300], title, embedded_thumbnail
+
+
+def _build_result_embed(title, scrapbox_url, thumbnail, description, color):
+    embed = discord.Embed(title=title, url=scrapbox_url, description=description, color=color)
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    return embed
 
 
 def _format_error_reply(status, body):
@@ -197,30 +206,43 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
         return
 
     await interaction.response.defer()
-    status, body, title = save_to_scrapbox(url, overwrite=overwrite)
+    status, body, title, thumbnail = save_to_scrapbox(url, overwrite=overwrite)
     scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+    content = f'{interaction.user.display_name}\n{url}'
 
     if status == 'duplicate':
-        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n既に保存済みです {scrapbox_url}')
+        embed = _build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue())
+        await interaction.followup.send(content=content, embed=embed)
     elif status == 200:
-        suffix = '\n(上書き保存しました)' if overwrite else ''
-        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n{scrapbox_url}{suffix}')
+        description = '上書き保存しました' if overwrite else '保存しました'
+        embed = _build_result_embed(title, scrapbox_url, thumbnail, description, discord.Color.green())
+        await interaction.followup.send(content=content, embed=embed)
     else:
         await interaction.followup.send(_format_error_reply(status, body))
 
 
-@tree.command(name='alias', description='人物名の表記ゆれをScrapboxの表記ゆれページに追加します')
-@discord.app_commands.describe(canonical='本名（正式表記）', alias='追加する別名')
-async def alias_command(interaction: discord.Interaction, canonical: str, alias: str):
+alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')
+tree.add_command(alias_group)
+
+
+def _check_alias_command_allowed(interaction, require_permission):
     if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
+        return 'このチャンネルでは使えません'
     if not CREDIT_MAPPING_PAGE:
-        await interaction.response.send_message('CREDIT_MAPPING_PAGEが設定されていません', ephemeral=True)
-        return
-    permissions = getattr(interaction.user, 'guild_permissions', None)
-    if not permissions or not permissions.manage_guild:
-        await interaction.response.send_message('このコマンドの実行には「サーバーの管理」権限が必要です', ephemeral=True)
+        return 'CREDIT_MAPPING_PAGEが設定されていません'
+    if require_permission:
+        permissions = getattr(interaction.user, 'guild_permissions', None)
+        if not permissions or not permissions.manage_guild:
+            return 'このコマンドの実行には「サーバーの管理」権限が必要です'
+    return None
+
+
+@alias_group.command(name='add', description='表記ゆれを追加します')
+@discord.app_commands.describe(canonical='本名（正式表記）', alias='追加する別名')
+async def alias_add_command(interaction: discord.Interaction, canonical: str, alias: str):
+    error = _check_alias_command_allowed(interaction, require_permission=True)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -232,6 +254,45 @@ async def alias_command(interaction: discord.Interaction, canonical: str, alias:
         await interaction.followup.send(f'{canonical} == {alias} を登録しました')
     else:
         await interaction.followup.send(_format_error_reply(status, body))
+
+
+@alias_group.command(name='remove', description='表記ゆれを削除します')
+@discord.app_commands.describe(canonical='本名（正式表記）', alias='削除する別名')
+async def alias_remove_command(interaction: discord.Interaction, canonical: str, alias: str):
+    error = _check_alias_command_allowed(interaction, require_permission=True)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    status, body = name_linker.remove_alias(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
+
+    if status == 200:
+        global _alias_map_cache
+        _alias_map_cache = None
+        await interaction.followup.send(f'{canonical} == {alias} を削除しました')
+    elif status == 404:
+        await interaction.followup.send(f'❌ {body}')
+    else:
+        await interaction.followup.send(_format_error_reply(status, body))
+
+
+@alias_group.command(name='list', description='登録済みの表記ゆれ一覧を表示します')
+async def alias_list_command(interaction: discord.Interaction):
+    error = _check_alias_command_allowed(interaction, require_permission=False)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    lines = name_linker.list_aliases(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE)
+    if not lines:
+        await interaction.followup.send('登録されている表記ゆれはありません')
+        return
+    text = '\n'.join(lines)
+    if len(text) > 1900:
+        text = text[:1900] + '\n...(省略)'
+    await interaction.followup.send(text)
 
 
 @client.event
@@ -252,16 +313,17 @@ async def on_message(message):
         await message.reply('URLが見つかりませんでした')
         return
     results = []
+    embeds = []
     for url in urls:
-        status, body, title = save_to_scrapbox(url)
+        status, body, title, thumbnail = save_to_scrapbox(url)
         scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
         if status == 'duplicate':
-            results.append(f'既に保存済みです {scrapbox_url}')
+            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue()))
         elif status == 200:
-            results.append(f'保存しました {scrapbox_url}')
+            embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '保存しました', discord.Color.green()))
         else:
             results.append(_format_error_reply(status, body))
-    await message.reply('\n'.join(results))
+    await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
 
 
 class HealthHandler(BaseHTTPRequestHandler):

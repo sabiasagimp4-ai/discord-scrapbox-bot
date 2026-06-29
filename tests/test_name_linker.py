@@ -180,5 +180,102 @@ class AddAliasTests(unittest.TestCase):
         self.assertIsNone(status)
 
 
+class ListAliasesTests(unittest.TestCase):
+    def test_empty_title_returns_empty_list_without_network(self):
+        with patch('name_linker.requests.get') as mock_get:
+            result = name_linker.list_aliases('proj', 'sid', '')
+            mock_get.assert_not_called()
+            self.assertEqual(result, [])
+
+    def test_returns_body_lines_excluding_title(self):
+        page = {
+            'persistent': True,
+            'lines': [
+                {'text': '表記ゆれ'},
+                {'text': '山田太郎 == タロー, Taro'},
+                {'text': ''},
+                {'text': '鈴木花子 == ハナコ'},
+            ],
+        }
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, page)):
+            result = name_linker.list_aliases('proj', 'sid', '表記ゆれ')
+        self.assertEqual(result, ['山田太郎 == タロー, Taro', '鈴木花子 == ハナコ'])
+
+    def test_non_persistent_page_returns_empty_list(self):
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, {'persistent': False})):
+            result = name_linker.list_aliases('proj', 'sid', '表記ゆれ')
+        self.assertEqual(result, [])
+
+    def test_request_exception_returns_empty_list(self):
+        with patch('name_linker.requests.get', side_effect=Exception('network error')):
+            result = name_linker.list_aliases('proj', 'sid', '表記ゆれ')
+        self.assertEqual(result, [])
+
+
+class RemoveAliasTests(unittest.TestCase):
+    @staticmethod
+    def _sent_lines(mock_post):
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        return payload['pages'][0]['lines']
+
+    def test_removes_alias_keeping_other_aliases_on_line(self):
+        page = {
+            'persistent': True,
+            'lines': [
+                {'text': '表記ゆれ'},
+                {'text': '山田太郎 == タロー, Taro'},
+                {'text': '鈴木花子 == ハナコ'},
+            ],
+        }
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, page)):
+            with patch('name_linker.requests.post', return_value=FakeResponse(200, text='ok')) as mock_post:
+                status, body = name_linker.remove_alias('proj', 'sid', '表記ゆれ', '山田太郎', 'Taro')
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self._sent_lines(mock_post),
+            ['表記ゆれ', '山田太郎 == タロー', '鈴木花子 == ハナコ'],
+        )
+
+    def test_removes_line_entirely_when_last_alias_removed(self):
+        page = {
+            'persistent': True,
+            'lines': [
+                {'text': '表記ゆれ'},
+                {'text': '山田太郎 == タロー'},
+                {'text': '鈴木花子 == ハナコ'},
+            ],
+        }
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, page)):
+            with patch('name_linker.requests.post', return_value=FakeResponse(200, text='ok')) as mock_post:
+                status, body = name_linker.remove_alias('proj', 'sid', '表記ゆれ', '山田太郎', 'タロー')
+        self.assertEqual(status, 200)
+        self.assertEqual(self._sent_lines(mock_post), ['表記ゆれ', '鈴木花子 == ハナコ'])
+
+    def test_unregistered_canonical_returns_404_without_post(self):
+        page = {'persistent': True, 'lines': [{'text': '表記ゆれ'}, {'text': '鈴木花子 == ハナコ'}]}
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, page)):
+            with patch('name_linker.requests.post') as mock_post:
+                status, body = name_linker.remove_alias('proj', 'sid', '表記ゆれ', '山田太郎', 'タロー')
+        mock_post.assert_not_called()
+        self.assertEqual(status, 404)
+        self.assertEqual(body, '登録されていない本名です')
+
+    def test_unregistered_alias_returns_404_without_post(self):
+        page = {'persistent': True, 'lines': [{'text': '表記ゆれ'}, {'text': '山田太郎 == タロー'}]}
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, page)):
+            with patch('name_linker.requests.post') as mock_post:
+                status, body = name_linker.remove_alias('proj', 'sid', '表記ゆれ', '山田太郎', 'Taro')
+        mock_post.assert_not_called()
+        self.assertEqual(status, 404)
+        self.assertEqual(body, '登録されていない別名です')
+
+    def test_get_exception_returns_none_status(self):
+        with patch('name_linker.requests.get', side_effect=Exception('network error')):
+            with patch('name_linker.requests.post') as mock_post:
+                status, body = name_linker.remove_alias('proj', 'sid', '表記ゆれ', '山田太郎', 'タロー')
+        mock_post.assert_not_called()
+        self.assertIsNone(status)
+
+
 if __name__ == '__main__':
     unittest.main()
