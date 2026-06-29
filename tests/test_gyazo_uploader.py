@@ -64,5 +64,35 @@ class UploadThumbnailTests(unittest.TestCase):
         self.assertEqual(result, '')
 
 
+class CheckConnectionTests(unittest.TestCase):
+    def test_no_access_token_returns_none_without_network(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', ''):
+            with patch('gyazo_uploader.requests.get') as mock_get:
+                ok, message = gyazo_uploader.check_connection()
+        mock_get.assert_not_called()
+        self.assertIsNone(ok)
+        self.assertEqual(message, '未設定')
+
+    def test_status_200_returns_ok(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(200)):
+                ok, message = gyazo_uploader.check_connection()
+        self.assertTrue(ok)
+        self.assertEqual(message, '接続OK')
+
+    def test_other_status_returns_false(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(401)):
+                ok, message = gyazo_uploader.check_connection()
+        self.assertFalse(ok)
+
+    def test_request_exception_returns_false(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.get', side_effect=Exception('network error')):
+                ok, message = gyazo_uploader.check_connection()
+        self.assertFalse(ok)
+        self.assertEqual(message, 'network error')
+
+
 if __name__ == '__main__':
     unittest.main()

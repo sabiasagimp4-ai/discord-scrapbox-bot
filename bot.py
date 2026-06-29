@@ -121,6 +121,30 @@ def fetch_metadata(url):
     return {'title': urlparse(url).netloc, 'description': '', 'thumbnail': ''}
 
 
+def check_youtube_connection():
+    """YouTube Data APIキーの有効性を確認する。戻り値: (ok, message)。未設定時は (None, '未設定')"""
+    if not YOUTUBE_API_KEY:
+        return None, '未設定'
+    try:
+        r = requests.get(
+            'https://www.googleapis.com/youtube/v3/videos',
+            params={'part': 'id', 'id': 'dQw4w9WgXcQ', 'key': YOUTUBE_API_KEY},
+            timeout=5,
+        )
+    except Exception as e:
+        return False, str(e)
+    if r.status_code == 200:
+        return True, '接続OK'
+    return False, f'ステータス({r.status_code})'
+
+
+def _format_status_line(label, result):
+    ok, detail = result
+    if ok is None:
+        return f'⏭️ {label}: {detail}'
+    return f'{"✅" if ok else "❌"} {label}: {detail}'
+
+
 def get_existing_pages():
     now = time.time()
     if now - _pages_cache['ts'] > PAGES_CACHE_TTL:
@@ -219,6 +243,23 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
         await interaction.followup.send(content=content, embed=embed)
     else:
         await interaction.followup.send(_format_error_reply(status, body))
+
+
+@tree.command(name='status', description='Bot・Scrapbox・外部APIの疎通状況を確認します')
+async def status_command(interaction: discord.Interaction):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    lines = [
+        '✅ Discord: 接続中',
+        _format_status_line('Scrapbox', name_linker.check_connection(SCRAPBOX_PROJECT, SCRAPBOX_SID)),
+        _format_status_line('YouTube Data API', check_youtube_connection()),
+        _format_status_line('OpenRouter(AI)', credit_extractor.check_connection()),
+        _format_status_line('Gyazo', gyazo_uploader.check_connection()),
+    ]
+    await interaction.followup.send('\n'.join(lines))
 
 
 alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')

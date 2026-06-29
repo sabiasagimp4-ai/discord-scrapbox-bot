@@ -208,6 +208,24 @@ def remove_alias(project, sid, mapping_page_title, canonical, alias):
     return r2.status_code, r2.text[:300]
 
 
+def check_connection(project, sid):
+    """Scrapboxへの接続性とCookieの有効性を確認する。戻り値: (ok, message)"""
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}',
+            params={'limit': 1},
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception as e:
+        return False, str(e)
+    if r.status_code == 200:
+        return True, '接続OK'
+    if r.status_code == 403:
+        return False, 'Cookie(SCRAPBOX_SID)が期限切れの可能性があります'
+    return False, f'ステータス({r.status_code})'
+
+
 def resolve_name(name, pages, alias_map):
     """名前を既存ページと照合し、一致すれば Scrapbox リンク記法 [名前] に変換する"""
     normalized = _normalize(name)

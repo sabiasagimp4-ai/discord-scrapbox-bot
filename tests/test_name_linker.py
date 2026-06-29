@@ -277,5 +277,30 @@ class RemoveAliasTests(unittest.TestCase):
         self.assertIsNone(status)
 
 
+class CheckConnectionTests(unittest.TestCase):
+    def test_status_200_returns_ok(self):
+        with patch('name_linker.requests.get', return_value=FakeResponse(200)):
+            ok, message = name_linker.check_connection('proj', 'sid')
+        self.assertTrue(ok)
+        self.assertEqual(message, '接続OK')
+
+    def test_status_403_returns_cookie_expired_message(self):
+        with patch('name_linker.requests.get', return_value=FakeResponse(403)):
+            ok, message = name_linker.check_connection('proj', 'sid')
+        self.assertFalse(ok)
+        self.assertIn('Cookie', message)
+
+    def test_other_status_returns_false(self):
+        with patch('name_linker.requests.get', return_value=FakeResponse(500)):
+            ok, message = name_linker.check_connection('proj', 'sid')
+        self.assertFalse(ok)
+
+    def test_request_exception_returns_false(self):
+        with patch('name_linker.requests.get', side_effect=Exception('network error')):
+            ok, message = name_linker.check_connection('proj', 'sid')
+        self.assertFalse(ok)
+        self.assertEqual(message, 'network error')
+
+
 if __name__ == '__main__':
     unittest.main()
