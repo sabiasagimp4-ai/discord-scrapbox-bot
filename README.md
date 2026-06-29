@@ -186,7 +186,6 @@ discord-scrapbox-bot/
 ```
 動画タイトル
 [https://youtu.be/xxxxxx]
-クレジット
  Direction: [山田太郎]
  Illustration: [鈴木花子]
 ```

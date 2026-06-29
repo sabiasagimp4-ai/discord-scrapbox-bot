@@ -195,7 +195,6 @@ def save_to_scrapbox(url, overwrite=False):
     if credits:
         pages = get_existing_pages()
         alias_map = get_alias_map()
-        lines.append('クレジット')
         for c in credits:
             resolved = name_linker.resolve_name(c['name'], pages, alias_map)
             lines.append(f" {c['role']}: {resolved}")
