@@ -5,9 +5,10 @@ import credit_extractor
 
 
 class FakeResponse:
-    def __init__(self, json_data=None, status_code=200):
+    def __init__(self, json_data=None, status_code=200, text=''):
         self._json_data = json_data or {}
         self.status_code = status_code
+        self.text = text
 
     def json(self):
         return self._json_data
@@ -63,6 +64,76 @@ class ExtractCreditsTests(unittest.TestCase):
             with patch('credit_extractor.requests.post', side_effect=Exception('timeout')):
                 result = credit_extractor.extract_credits('説明')
         self.assertEqual(result, [])
+
+
+class ExtractCreditsDebugTests(unittest.TestCase):
+    def test_no_api_key_returns_error_without_network(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', ''):
+            with patch('credit_extractor.requests.post') as mock_post:
+                credits, raw_response, error = credit_extractor.extract_credits_debug('監督: 山田太郎')
+        mock_post.assert_not_called()
+        self.assertEqual(credits, [])
+        self.assertIsNone(raw_response)
+        self.assertEqual(error, 'OPENROUTER_API_KEYが未設定です')
+
+    def test_no_description_returns_error_without_network(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post') as mock_post:
+                credits, raw_response, error = credit_extractor.extract_credits_debug('')
+        mock_post.assert_not_called()
+        self.assertEqual(credits, [])
+        self.assertIsNone(raw_response)
+        self.assertEqual(error, '概要欄が空です')
+
+    def test_successful_extraction_returns_credits_and_raw_response(self):
+        content = '{"credits": [{"role": "Direction", "name": "山田太郎"}]}'
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response(content)):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('監督: 山田太郎')
+        self.assertEqual(credits, [{'role': 'Direction', 'name': '山田太郎'}])
+        self.assertEqual(raw_response, content)
+        self.assertIsNone(error)
+
+    def test_non_200_status_returns_error_with_body(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=FakeResponse(status_code=401, text='unauthorized')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertIsNone(raw_response)
+        self.assertIn('401', error)
+        self.assertIn('unauthorized', error)
+
+    def test_malformed_response_returns_error_with_raw_text(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=FakeResponse({'unexpected': 'shape'}, text='raw body')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertEqual(raw_response, 'raw body')
+        self.assertEqual(error, 'レスポンスの形式が想定と異なります')
+
+    def test_response_without_json_object_returns_error_with_raw_text(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response('no json here')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertEqual(raw_response, 'no json here')
+        self.assertEqual(error, 'JSON形式の応答が見つかりませんでした')
+
+    def test_invalid_json_returns_error_with_raw_text(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=_openrouter_response('{not valid json}')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertEqual(raw_response, '{not valid json}')
+        self.assertEqual(error, '応答のJSON解析に失敗しました')
+
+    def test_request_exception_returns_error_without_raw_response(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', side_effect=Exception('timeout')):
+                credits, raw_response, error = credit_extractor.extract_credits_debug('説明')
+        self.assertEqual(credits, [])
+        self.assertIsNone(raw_response)
+        self.assertEqual(error, 'リクエストエラー: timeout')
 
 
 class CheckConnectionTests(unittest.TestCase):

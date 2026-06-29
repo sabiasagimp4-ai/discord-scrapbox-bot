@@ -326,11 +326,15 @@ async def debug_command(interaction: discord.Interaction, url: str):
     if not credit_extractor.OPENROUTER_API_KEY:
         credits_text = '(OPENROUTER_API_KEY未設定のためスキップ)'
     else:
-        credits = credit_extractor.extract_credits(raw_description)
-        if credits:
+        credits, raw_response, error = credit_extractor.extract_credits_debug(raw_description)
+        if error:
+            credits_text = f'❌ {error}'
+            if raw_response:
+                credits_text += f'\n--- 生レスポンス ---\n{raw_response}'
+        elif credits:
             credits_text = '\n'.join(f"{c['role']}: {c['name']}" for c in credits)
         else:
-            credits_text = '(抽出結果なし)'
+            credits_text = '(抽出結果なし。LLMの生レスポンス↓)\n' + (raw_response or '(レスポンスなし)')
     if len(credits_text) > 1000:
         credits_text = credits_text[:1000] + '\n...(省略)'
     embed.add_field(name='クレジット抽出結果(OpenRouter)', value=credits_text, inline=False)
