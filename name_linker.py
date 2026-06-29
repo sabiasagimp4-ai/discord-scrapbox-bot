@@ -1,3 +1,5 @@
+import json
+
 import requests
 
 
@@ -70,6 +72,63 @@ def check_page_exists(project, sid, title):
         return bool(r.json().get('persistent', False))
     except Exception:
         return False
+
+
+def add_alias(project, sid, mapping_page_title, canonical, alias):
+    """表記ゆれページに `canonical == alias` を追記する。
+    既存のcanonical行があれば別名を追加し、無ければ新規行を作る（既存行は削除しない）。
+    戻り値: (status_code, message)
+    """
+    canonical = canonical.strip()
+    alias = alias.strip()
+
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(mapping_page_title)}',
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+
+    body_lines = []
+    if r.status_code == 200:
+        data = r.json()
+        if data.get('persistent'):
+            page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
+            body_lines = page_lines[1:]  # 1行目はタイトル行
+
+    updated = False
+    for i, text in enumerate(body_lines):
+        line_canonical, sep, aliases_part = text.partition('==')
+        if not sep or line_canonical.strip().lower() != canonical.lower():
+            continue
+        existing_aliases = [a.strip() for a in aliases_part.split(',') if a.strip()]
+        if alias.lower() in (a.lower() for a in existing_aliases):
+            return 200, '既に登録済みです'
+        existing_aliases.append(alias)
+        body_lines[i] = f'{line_canonical.strip()} == {", ".join(existing_aliases)}'
+        updated = True
+        break
+
+    if not updated:
+        body_lines.append(f'{canonical} == {alias}')
+
+    payload = json.dumps({'pages': [{'title': mapping_page_title, 'lines': [mapping_page_title] + body_lines}]})
+    try:
+        r2 = requests.post(
+            f'https://scrapbox.io/api/page-data/import/{project}.json',
+            files={'import-file': ('pages.json', payload, 'application/json')},
+            headers={
+                'Cookie': f'connect.sid={sid}',
+                'Origin': 'https://scrapbox.io',
+                'Referer': 'https://scrapbox.io',
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+    return r2.status_code, r2.text[:300]
 
 
 def resolve_name(name, pages, alias_map):

@@ -11,7 +11,7 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 1. 指定チャンネルに `{キーワード} {URL}` を含むメッセージを送信
 2. BotがURLを検出し、タイトルを取得
 3. ScrapboxにページをImport API経由で作成
-4. DiscordにScrapboxページのURLをリプライ
+4. DiscordにScrapboxページのURLをリプライ（複数URLが含まれる場合は1件ずつではなく1通にまとめて返信）
 
 ```
 [ユーザー] 保存 https://youtu.be/xxxxxx
@@ -27,6 +27,20 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 https://youtu.be/xxxxxx
 https://scrapbox.io/myproject/動画タイトル
 ```
+
+`overwrite:true` を指定すると、同タイトルのページが既に存在していても上書き保存します（通常は既存ページがあれば新規作成をスキップします）。
+
+### `/alias` スラッシュコマンド
+
+人物名の表記ゆれ（`CREDIT_MAPPING_PAGE` で指定したScrapboxページ）に別名を追加します。
+
+```
+/alias canonical:山田太郎 alias:タロー
+```
+
+- `CREDIT_MAPPING_PAGE` が未設定の場合は実行できません
+- 実行には「サーバーの管理」権限が必要です
+- 既存の表記ゆれは削除されず、追記のみ行われます（同じ別名が既に登録済みの場合は何もせず通知します）
 
 ---
 
