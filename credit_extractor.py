@@ -4,7 +4,7 @@ import re
 import requests
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'openai/gpt-oss-20b:free')
+OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'nvidia/nemotron-nano-9b-v2:free')
 
 _SYSTEM_PROMPT = (
     'あなたはYouTubeのMV概要欄から映像制作クレジットを抽出する専門家です。\n'
