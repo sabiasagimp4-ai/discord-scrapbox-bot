@@ -136,11 +136,11 @@ def get_alias_map():
     return _alias_map_cache
 
 
-def save_to_scrapbox(url):
+def save_to_scrapbox(url, overwrite=False):
     metadata = fetch_metadata(url)
     title = metadata['title']
 
-    if name_linker.check_page_exists(SCRAPBOX_PROJECT, SCRAPBOX_SID, title):
+    if not overwrite and name_linker.check_page_exists(SCRAPBOX_PROJECT, SCRAPBOX_SID, title):
         return 'duplicate', None, title
 
     lines = [title, f'[{url}]']
@@ -190,20 +190,46 @@ async def on_ready():
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
-@discord.app_commands.describe(url='保存したいURL')
-async def save_command(interaction: discord.Interaction, url: str):
+@discord.app_commands.describe(url='保存したいURL', overwrite='既存ページがあっても上書き保存する')
+async def save_command(interaction: discord.Interaction, url: str, overwrite: bool = False):
     if interaction.channel_id != CHANNEL_ID:
         await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
         return
 
     await interaction.response.defer()
-    status, body, title = save_to_scrapbox(url)
+    status, body, title = save_to_scrapbox(url, overwrite=overwrite)
     scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
 
     if status == 'duplicate':
         await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n既に保存済みです {scrapbox_url}')
     elif status == 200:
-        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n{scrapbox_url}')
+        suffix = '\n(上書き保存しました)' if overwrite else ''
+        await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n{scrapbox_url}{suffix}')
+    else:
+        await interaction.followup.send(_format_error_reply(status, body))
+
+
+@tree.command(name='alias', description='人物名の表記ゆれをScrapboxの表記ゆれページに追加します')
+@discord.app_commands.describe(canonical='本名（正式表記）', alias='追加する別名')
+async def alias_command(interaction: discord.Interaction, canonical: str, alias: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    if not CREDIT_MAPPING_PAGE:
+        await interaction.response.send_message('CREDIT_MAPPING_PAGEが設定されていません', ephemeral=True)
+        return
+    permissions = getattr(interaction.user, 'guild_permissions', None)
+    if not permissions or not permissions.manage_guild:
+        await interaction.response.send_message('このコマンドの実行には「サーバーの管理」権限が必要です', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    status, body = name_linker.add_alias(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
+
+    if status == 200:
+        global _alias_map_cache
+        _alias_map_cache = None
+        await interaction.followup.send(f'{canonical} == {alias} を登録しました')
     else:
         await interaction.followup.send(_format_error_reply(status, body))
 
@@ -225,15 +251,17 @@ async def on_message(message):
     if not urls:
         await message.reply('URLが見つかりませんでした')
         return
+    results = []
     for url in urls:
         status, body, title = save_to_scrapbox(url)
         scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
         if status == 'duplicate':
-            await message.reply(f'既に保存済みです {scrapbox_url}')
+            results.append(f'既に保存済みです {scrapbox_url}')
         elif status == 200:
-            await message.reply(f'保存しました {scrapbox_url}')
+            results.append(f'保存しました {scrapbox_url}')
         else:
-            await message.reply(_format_error_reply(status, body))
+            results.append(_format_error_reply(status, body))
+    await message.reply('\n'.join(results))
 
 
 class HealthHandler(BaseHTTPRequestHandler):
