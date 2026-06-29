@@ -36,10 +36,13 @@ https://scrapbox.io/myproject/動画タイトル
 |---|---|
 | YouTube | `YOUTUBE_API_KEY` 設定時はYouTube Data API v3（説明欄も取得可）、未設定時はoEmbed API（タイトルのみ） |
 | Vimeo | oEmbed API（タイトル・説明欄とも取得可） |
-| Twitter(X) | HTMLの `<title>` タグ＋ `og:image` メタタグ（サムネイル画像として埋め込み） |
-| その他 | HTMLの `<title>` タグをスクレイピング |
+| その他 | HTMLの `<title>` タグ＋ `og:image` メタタグ（サムネイル画像として取得） |
 
 タイトルの改行・連続空白は1スペースに正規化されます（Scrapboxのページタイトルは複数行不可のため）。
+
+### サムネイル画像のGyazoアップロード（任意）
+
+`og:image` で取得したサムネイルは、サイト側のホットリンク制限で直リンク表示できない場合があるため、`GYAZO_ACCESS_TOKEN` を設定すると画像をGyazoにアップロードし直し、その恒久URLをScrapboxページに埋め込みます。未設定時は取得した画像URLをそのまま埋め込みます（アップロード失敗時もフォールバックで直リンクを使用）。
 
 ---
 
@@ -102,6 +105,7 @@ Render → Environment から設定します。
 | `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `openai/gpt-oss-120b:free`） | `google/gemini-flash-1.5` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
 | `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |
+| `GYAZO_ACCESS_TOKEN` | — | サムネイル画像をGyazoにアップロードし直すためのアクセストークン。未設定時は取得した画像URLを直接埋め込む | `xxxxxxxx-xxxx-...` |
 
 ### connect.sid の取得方法
 
@@ -109,7 +113,12 @@ Render → Environment から設定します。
 2. DevTools（F12）→ Application → Cookies → `scrapbox.io`
 3. `connect.sid` のValue列をコピー（`s%3A` で始まる文字列）
 
-> Cookieには有効期限があります。保存が403エラーになり始めたら再取得してください。
+> Cookieには有効期限があります。保存が403エラーになり始めたら再取得してください。Botも403を検出した場合はDiscordに「Cookieが期限切れの可能性があります」と案内するメッセージを返します。
+
+### GYAZO_ACCESS_TOKEN の取得方法
+
+1. https://gyazo.com/api でアプリを登録
+2. 発行されたアクセストークンをコピー
 
 ---
 
@@ -120,6 +129,8 @@ discord-scrapbox-bot/
 ├── bot.py               # メインロジック
 ├── credit_extractor.py  # LLMによるクレジット抽出
 ├── name_linker.py       # Scrapbox人物名リンク照合
+├── gyazo_uploader.py    # サムネイル画像のGyazoアップロード
+├── tests/                # 単体テスト（unittest）
 ├── requirements.txt     # 依存パッケージ（discord.py, requests）
 ├── Dockerfile            # コンテナ定義
 └── fly.toml              # 未使用（Fly.io用、Renderでは不要）
@@ -137,7 +148,7 @@ discord-scrapbox-bot/
  Illustration: [鈴木花子]
 ```
 
-YouTube・Vimeoは動画プレイヤーとして埋め込まれます。Twitter(X)は `og:image` から取得したサムネイル画像をURL行の直後に埋め込みます。クレジット行はLLMが説明欄から抽出できた場合のみ追加されます。
+YouTube・Vimeoは動画プレイヤーとして埋め込まれます。その他のURLは `og:image` から取得したサムネイル画像（`GYAZO_ACCESS_TOKEN` 設定時はGyazoアップロード後のURL）をURL行の直後に埋め込みます。クレジット行はLLMが説明欄から抽出できた場合のみ追加されます。
 
 ---
 
@@ -153,4 +164,14 @@ export SCRAPBOX_SID=...
 export KEYWORD=保存
 
 python bot.py
+```
+
+---
+
+## テスト
+
+`name_linker.py`・`credit_extractor.py`・`gyazo_uploader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。
+
+```bash
+python -m unittest discover -s tests -v
 ```
