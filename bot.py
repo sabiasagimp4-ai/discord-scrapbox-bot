@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
 import credit_extractor
+import gyazo_uploader
 import name_linker
 
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -104,7 +105,7 @@ def fetch_metadata(url):
         except Exception:
             pass
 
-    # 汎用HTMLタイトル取得（X/Twitterはog:imageもサムネイルとして取得）
+    # 汎用HTMLタイトル取得（og:imageもサムネイルとして取得）
     try:
         r = requests.get(url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
         match = re.search(r'<title[^>]*>([^<]+)</title>', r.text, re.IGNORECASE)
@@ -113,10 +114,7 @@ def fetch_metadata(url):
             title = re.sub(r'https?://\S+', '', title).strip()
             title = _normalize_title(title)
             if title:
-                thumbnail = ''
-                if 'twitter.com' in url or 'x.com' in url:
-                    thumbnail = _extract_og_image(r.text)
-                return {'title': title, 'description': '', 'thumbnail': thumbnail}
+                return {'title': title, 'description': '', 'thumbnail': _extract_og_image(r.text)}
     except Exception:
         pass
 
@@ -147,8 +145,10 @@ def save_to_scrapbox(url):
 
     lines = [title, f'[{url}]']
 
-    if metadata.get('thumbnail'):
-        lines.append(f'[{metadata["thumbnail"]}]')
+    thumbnail = metadata.get('thumbnail')
+    if thumbnail:
+        # 直リンクはホットリンク制限で表示できないサイトがあるため、Gyazoにアップロードして恒久URL化する
+        lines.append(f'[{gyazo_uploader.upload_thumbnail(thumbnail) or thumbnail}]')
 
     credits = credit_extractor.extract_credits(metadata['description'])
     if credits:
@@ -170,6 +170,12 @@ def save_to_scrapbox(url):
         },
     )
     return r.status_code, r.text[:300], title
+
+
+def _format_error_reply(status, body):
+    if status == 403:
+        return '❌ Scrapboxの認証エラー(403): Cookie(SCRAPBOX_SID)が期限切れの可能性があります。管理者に再取得を依頼してください。'
+    return f'❌ エラー({status}): {body}'
 
 
 @client.event
@@ -199,7 +205,7 @@ async def save_command(interaction: discord.Interaction, url: str):
     elif status == 200:
         await interaction.followup.send(f'{interaction.user.display_name}\n{url}\n{scrapbox_url}')
     else:
-        await interaction.followup.send(f'❌ エラー({status}): {body}')
+        await interaction.followup.send(_format_error_reply(status, body))
 
 
 @client.event
@@ -227,7 +233,7 @@ async def on_message(message):
         elif status == 200:
             await message.reply(f'保存しました {scrapbox_url}')
         else:
-            await message.reply(f'❌ エラー({status}): {body}')
+            await message.reply(_format_error_reply(status, body))
 
 
 class HealthHandler(BaseHTTPRequestHandler):
