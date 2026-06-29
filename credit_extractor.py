@@ -36,9 +36,15 @@ def check_connection():
     return False, f'ステータス({r.status_code})'
 
 
-def extract_credits(description):
-    if not OPENROUTER_API_KEY or not description:
-        return []
+def extract_credits_debug(description):
+    """extract_creditsの内部処理を診断情報付きで実行する。
+    戻り値: (credits: list, raw_response: str|None, error: str|None)
+    """
+    if not OPENROUTER_API_KEY:
+        return [], None, 'OPENROUTER_API_KEYが未設定です'
+    if not description:
+        return [], None, '概要欄が空です'
+
     try:
         r = requests.post(
             'https://openrouter.ai/api/v1/chat/completions',
@@ -49,11 +55,29 @@ def extract_credits(description):
             },
             timeout=5,
         )
+    except Exception as e:
+        return [], None, f'リクエストエラー: {e}'
+
+    if r.status_code != 200:
+        return [], None, f'ステータス({r.status_code}): {r.text[:200]}'
+
+    try:
         text = r.json()['choices'][0]['message']['content']
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if not match:
-            return []
-        data = json.loads(match.group(0))
-        return [c for c in data.get('credits', []) if c.get('name') and c.get('role')]
     except Exception:
-        return []
+        return [], r.text[:1000], 'レスポンスの形式が想定と異なります'
+
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match:
+        return [], text, 'JSON形式の応答が見つかりませんでした'
+
+    try:
+        data = json.loads(match.group(0))
+    except Exception:
+        return [], text, '応答のJSON解析に失敗しました'
+
+    credits = [c for c in data.get('credits', []) if c.get('name') and c.get('role')]
+    return credits, text, None
+
+
+def extract_credits(description):
+    return extract_credits_debug(description)[0]
