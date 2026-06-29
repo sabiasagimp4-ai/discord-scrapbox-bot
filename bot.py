@@ -1,3 +1,4 @@
+import asyncio
 import discord
 import json
 import re
@@ -275,8 +276,8 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
         return
 
     await interaction.response.defer()
-    urls = expand_urls([url])
-    results, embeds = process_urls(urls, overwrite=overwrite)
+    urls = await asyncio.to_thread(expand_urls, [url])
+    results, embeds = await asyncio.to_thread(process_urls, urls, overwrite=overwrite)
     content = f'{interaction.user.display_name}\n{url}'
 
     if embeds:
@@ -294,10 +295,10 @@ async def status_command(interaction: discord.Interaction):
     await interaction.response.defer()
     lines = [
         '✅ Discord: 接続中',
-        _format_status_line('Scrapbox', name_linker.check_connection(SCRAPBOX_PROJECT, SCRAPBOX_SID)),
-        _format_status_line('YouTube Data API', check_youtube_connection()),
-        _format_status_line('OpenRouter(AI)', credit_extractor.check_connection()),
-        _format_status_line('Gyazo', gyazo_uploader.check_connection()),
+        _format_status_line('Scrapbox', await asyncio.to_thread(name_linker.check_connection, SCRAPBOX_PROJECT, SCRAPBOX_SID)),
+        _format_status_line('YouTube Data API', await asyncio.to_thread(check_youtube_connection)),
+        _format_status_line('OpenRouter(AI)', await asyncio.to_thread(credit_extractor.check_connection)),
+        _format_status_line('Gyazo', await asyncio.to_thread(gyazo_uploader.check_connection)),
     ]
     await interaction.followup.send('\n'.join(lines))
 
@@ -310,7 +311,7 @@ async def debug_command(interaction: discord.Interaction, url: str):
         return
 
     await interaction.response.defer()
-    metadata = fetch_metadata(url)
+    metadata = await asyncio.to_thread(fetch_metadata, url)
     raw_description = metadata.get('description') or ''
     description = raw_description or '(概要欄なし、または取得不可)'
     if len(description) > 1500:
@@ -326,7 +327,7 @@ async def debug_command(interaction: discord.Interaction, url: str):
     if not credit_extractor.OPENROUTER_API_KEY:
         credits_text = '(OPENROUTER_API_KEY未設定のためスキップ)'
     else:
-        credits, raw_response, error = credit_extractor.extract_credits_debug(raw_description)
+        credits, raw_response, error = await asyncio.to_thread(credit_extractor.extract_credits_debug, raw_description)
         if error:
             credits_text = f'❌ {error}'
             if raw_response:
@@ -370,7 +371,7 @@ async def alias_add_command(interaction: discord.Interaction, canonical: str, al
         return
 
     await interaction.response.defer()
-    status, body = name_linker.add_alias(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
+    status, body = await asyncio.to_thread(name_linker.add_alias, SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
 
     if status == 200:
         global _alias_map_cache
@@ -389,7 +390,7 @@ async def alias_remove_command(interaction: discord.Interaction, canonical: str,
         return
 
     await interaction.response.defer()
-    status, body = name_linker.remove_alias(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
+    status, body = await asyncio.to_thread(name_linker.remove_alias, SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE, canonical, alias)
 
     if status == 200:
         global _alias_map_cache
@@ -409,7 +410,7 @@ async def alias_list_command(interaction: discord.Interaction):
         return
 
     await interaction.response.defer()
-    lines = name_linker.list_aliases(SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE)
+    lines = await asyncio.to_thread(name_linker.list_aliases, SCRAPBOX_PROJECT, SCRAPBOX_SID, CREDIT_MAPPING_PAGE)
     if not lines:
         await interaction.followup.send('登録されている表記ゆれはありません')
         return
@@ -431,12 +432,12 @@ async def on_message(message):
         print(f'[skip] keyword not found: {KEYWORD!r}')
         return
 
-    urls = expand_urls(re.findall(r'https?://[^\s<>"]+', message.content))
+    urls = await asyncio.to_thread(expand_urls, re.findall(r'https?://[^\s<>"]+', message.content))
     print(f'[urls] {urls}')
     if not urls:
         await message.reply('URLが見つかりませんでした')
         return
-    results, embeds = process_urls(urls)
+    results, embeds = await asyncio.to_thread(process_urls, urls)
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
 
 
