@@ -1,11 +1,14 @@
 import asyncio
 import discord
 import json
+import random
 import re
 import os
 import threading
 import time
 import requests
+from datetime import time as dt_time, timezone, timedelta
+from discord.ext import tasks
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
@@ -26,6 +29,8 @@ GUILD_ID = os.environ.get('GUILD_ID', '')
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
 _alias_map_cache = None
+
+JST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -212,6 +217,33 @@ def save_to_scrapbox(url, overwrite=False):
     return r.status_code, r.text[:300], title, embedded_thumbnail
 
 
+def fetch_random_article():
+    """Scrapboxプロジェクト内の全ページからランダムに1件選ぶ。
+    戻り値: {'title': str, 'scrapbox_url': str, 'thumbnail': str, 'description': str} または該当ページが無い場合はNone"""
+    pages = get_existing_pages()
+    if not pages:
+        return None
+    title = random.choice(pages)
+    scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+
+    thumbnail = ''
+    description = ''
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}',
+            headers={'Cookie': f'connect.sid={SCRAPBOX_SID}'},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            thumbnail = data.get('image') or ''
+            description = '\n'.join(data.get('descriptions', []))
+    except Exception:
+        pass
+
+    return {'title': title, 'scrapbox_url': scrapbox_url, 'thumbnail': thumbnail, 'description': description}
+
+
 def _build_result_embed(title, scrapbox_url, thumbnail, description, color):
     embed = discord.Embed(title=title, url=scrapbox_url, description=description, color=color)
     if thumbnail:
@@ -256,6 +288,18 @@ def process_urls(urls, overwrite=False):
     return results, embeds
 
 
+@tasks.loop(time=dt_time(hour=21, minute=0, tzinfo=JST))
+async def send_daily_random_article():
+    article = await asyncio.to_thread(fetch_random_article)
+    if not article:
+        return
+    channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+    embed = _build_result_embed(
+        article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
+    )
+    await channel.send(content='📚 今日のランダム記事', embed=embed)
+
+
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
@@ -265,6 +309,8 @@ async def on_ready():
         await tree.sync(guild=guild)
     else:
         await tree.sync()
+    if not send_daily_random_article.is_running():
+        send_daily_random_article.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
