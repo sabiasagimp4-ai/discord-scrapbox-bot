@@ -302,7 +302,7 @@ async def status_command(interaction: discord.Interaction):
     await interaction.followup.send('\n'.join(lines))
 
 
-@tree.command(name='debug', description='URLのメタデータ取得結果（概要欄など）を確認します')
+@tree.command(name='debug', description='URLのメタデータ取得結果（概要欄・クレジット抽出結果など）を確認します')
 @discord.app_commands.describe(url='確認したいURL')
 async def debug_command(interaction: discord.Interaction, url: str):
     if interaction.channel_id != CHANNEL_ID:
@@ -311,7 +311,8 @@ async def debug_command(interaction: discord.Interaction, url: str):
 
     await interaction.response.defer()
     metadata = fetch_metadata(url)
-    description = metadata.get('description') or '(概要欄なし、または取得不可)'
+    raw_description = metadata.get('description') or ''
+    description = raw_description or '(概要欄なし、または取得不可)'
     if len(description) > 1500:
         description = description[:1500] + '\n...(省略)'
 
@@ -321,6 +322,19 @@ async def debug_command(interaction: discord.Interaction, url: str):
         color=discord.Color.orange(),
     )
     embed.add_field(name='取得元', value=metadata.get('source', '不明'), inline=False)
+
+    if not credit_extractor.OPENROUTER_API_KEY:
+        credits_text = '(OPENROUTER_API_KEY未設定のためスキップ)'
+    else:
+        credits = credit_extractor.extract_credits(raw_description)
+        if credits:
+            credits_text = '\n'.join(f"{c['role']}: {c['name']}" for c in credits)
+        else:
+            credits_text = '(抽出結果なし)'
+    if len(credits_text) > 1000:
+        credits_text = credits_text[:1000] + '\n...(省略)'
+    embed.add_field(name='クレジット抽出結果(OpenRouter)', value=credits_text, inline=False)
+
     thumbnail = metadata.get('thumbnail')
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)

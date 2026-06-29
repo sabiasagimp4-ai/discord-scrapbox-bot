@@ -62,9 +62,10 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 
 ### `/debug` スラッシュコマンド
 
-指定したURLについて、Botが実際に取得するタイトル・概要欄・取得元（YouTube Data API / oEmbed / Vimeo oEmbed / HTML `<title>` のいずれを使ったか）を確認できます。Scrapboxへの保存は行いません。
+指定したURLについて、Botが実際に取得するタイトル・概要欄・取得元（YouTube Data API / oEmbed / Vimeo oEmbed / HTML `<title>` のいずれを使ったか）、および取得した概要欄からOpenRouterで抽出されるクレジット情報を確認できます。Scrapboxへの保存は行いません。
 
-YouTubeの概要欄がクレジット抽出されない場合、`YOUTUBE_API_KEY` が正しく概要欄を取得できているか（取得元が「YouTube Data API」になっているか）を確認するのに使えます。取得元が「YouTube oEmbed」になっている場合は、APIキーが未設定または無効なため概要欄が取得できていないことを示します。
+- YouTubeの概要欄がクレジット抽出されない場合、`YOUTUBE_API_KEY` が正しく概要欄を取得できているか（取得元が「YouTube Data API」になっているか）を確認するのに使えます。取得元が「YouTube oEmbed」になっている場合は、APIキーが未設定または無効なため概要欄が取得できていないことを示します。
+- 概要欄は取得できているのにクレジットが保存されない場合は、「クレジット抽出結果(OpenRouter)」を確認してください。`(OPENROUTER_API_KEY未設定のためスキップ)` ならキー自体が未設定、`(抽出結果なし)` ならOpenRouterへの問い合わせ自体は行われたが該当情報が見つからなかった（プロンプトやモデルの精度の問題の可能性）ことを示します。
 
 ---
 
