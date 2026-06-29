@@ -60,6 +60,12 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 
 各項目は ✅（正常） / ❌（異常） / ⏭️（未設定のためスキップ）のいずれかで表示されます。`YOUTUBE_API_KEY`・`OPENROUTER_API_KEY`・`GYAZO_ACCESS_TOKEN` は任意設定のため、未設定でも❌にはならず⏭️として扱われます。実行に特別な権限は不要です。
 
+### `/debug` スラッシュコマンド
+
+指定したURLについて、Botが実際に取得するタイトル・概要欄・取得元（YouTube Data API / oEmbed / Vimeo oEmbed / HTML `<title>` のいずれを使ったか）を確認できます。Scrapboxへの保存は行いません。
+
+YouTubeの概要欄がクレジット抽出されない場合、`YOUTUBE_API_KEY` が正しく概要欄を取得できているか（取得元が「YouTube Data API」になっているか）を確認するのに使えます。取得元が「YouTube oEmbed」になっている場合は、APIキーが未設定または無効なため概要欄が取得できていないことを示します。
+
 ---
 
 ## タイトル取得ロジック
