@@ -17,11 +17,13 @@ import gyazo_uploader
 import name_linker
 import playlist_loader
 
-TOKEN = os.environ['DISCORD_TOKEN']
-CHANNEL_ID = int(os.environ['CHANNEL_ID'])
+REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
+
+TOKEN = os.environ.get('DISCORD_TOKEN', '')
+CHANNEL_ID = int(os.environ.get('CHANNEL_ID') or '0')
 KEYWORD = os.environ.get('KEYWORD', '')
-SCRAPBOX_PROJECT = os.environ['SCRAPBOX_PROJECT']
-SCRAPBOX_SID = os.environ['SCRAPBOX_SID']
+SCRAPBOX_PROJECT = os.environ.get('SCRAPBOX_PROJECT', '')
+SCRAPBOX_SID = os.environ.get('SCRAPBOX_SID', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 CREDIT_MAPPING_PAGE = os.environ.get('CREDIT_MAPPING_PAGE', '')
 GUILD_ID = os.environ.get('GUILD_ID', '')
@@ -29,6 +31,8 @@ GUILD_ID = os.environ.get('GUILD_ID', '')
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
 _alias_map_cache = None
+_known_page_titles = None
+_recently_saved_titles = set()
 
 JST = timezone(timedelta(hours=9))
 
@@ -215,6 +219,8 @@ def save_to_scrapbox(url, overwrite=False):
         },
         timeout=10,
     )
+    if r.status_code == 200:
+        _recently_saved_titles.add(title)
     return r.status_code, r.text[:300], title, embedded_thumbnail
 
 
@@ -304,6 +310,39 @@ async def send_daily_random_article():
         print(f'[send_daily_random_article] error: {e}')
 
 
+def find_new_titles(known_titles, current_titles):
+    """既知のタイトル集合と現在の全タイトルを比較し、新規に増えたタイトルのリストを返す"""
+    return [title for title in current_titles if title not in known_titles]
+
+
+@tasks.loop(minutes=5)
+async def notify_new_pages():
+    global _known_page_titles
+    try:
+        current_titles = await asyncio.to_thread(get_existing_pages)
+        if _known_page_titles is None:
+            _known_page_titles = set(current_titles)
+            return
+
+        new_titles = find_new_titles(_known_page_titles, current_titles)
+        _known_page_titles = set(current_titles)
+        if not new_titles:
+            return
+
+        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        for title in new_titles:
+            if title in _recently_saved_titles:
+                _recently_saved_titles.discard(title)
+                continue
+            if title == CREDIT_MAPPING_PAGE:
+                continue
+            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+            embed = _build_result_embed(title, scrapbox_url, '', 'Scrapboxに新しいページが投稿されました', discord.Color.gold())
+            await channel.send(embed=embed)
+    except Exception as e:
+        print(f'[notify_new_pages] error: {e}')
+
+
 def run_daily_health_checks():
     """必須・任意の外部サービス接続を確認する。戻り値: 異常があった項目のメッセージのリスト（正常時は空リスト）"""
     checks = [
@@ -348,6 +387,8 @@ async def on_ready():
         send_daily_random_article.start()
     if not daily_health_check.is_running():
         daily_health_check.start()
+    if not notify_new_pages.is_running():
+        notify_new_pages.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
@@ -542,5 +583,13 @@ def run_health_server():
     HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 
-threading.Thread(target=run_health_server, daemon=True).start()
-client.run(TOKEN)
+def main():
+    missing = [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
+    if missing:
+        raise SystemExit(f'必須環境変数が未設定です: {", ".join(missing)}')
+    threading.Thread(target=run_health_server, daemon=True).start()
+    client.run(TOKEN)
+
+
+if __name__ == '__main__':
+    main()

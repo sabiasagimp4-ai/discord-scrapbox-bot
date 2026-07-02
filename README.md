@@ -77,6 +77,10 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 
 毎日8:00（日本時間）に `/status` と同じ項目（Scrapbox・YouTube Data API・OpenRouter・Gyazo）の疎通確認を自動実行します。全て正常な場合は何も通知しませんが、いずれかが異常な場合のみ指定チャンネルに警告を送信します。`SCRAPBOX_SID` Cookieの期限切れなど、気づかないうちに保存が失敗し続ける事態を早期発見するための機能です。
 
+### 新規ページ投稿の自動通知
+
+5分ごとにScrapboxプロジェクト内の全ページ一覧をポーリングし、前回確認時から新たに増えたページを検知して指定チャンネルに通知します。Scrapboxアプリから直接作成したページなど、このBot経由ではない投稿にも反応します。`/save` コマンドやメッセージ監視でBot自身が保存したページは、保存時のリプライと二重に通知されないよう自動的に除外されます。Bot起動直後の1回目は「今存在するページ」を基準として記録するだけで、既存ページ全件を通知することはありません。
+
 ---
 
 ## タイトル取得ロジック
@@ -220,7 +224,7 @@ python bot.py
 
 ## テスト
 
-`name_linker.py`・`credit_extractor.py`・`gyazo_uploader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。
+`bot.py`・`name_linker.py`・`credit_extractor.py`・`gyazo_uploader.py`・`playlist_loader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。`bot.py` は `discord.py` をインポートするため、テスト実行には `pip install -r requirements.txt` が必要です。
 
 ```bash
 python -m unittest discover -s tests -v
