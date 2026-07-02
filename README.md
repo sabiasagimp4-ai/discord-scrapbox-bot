@@ -88,7 +88,7 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 
 - **利用には `OPENROUTER_API_KEY` が必須**です（未設定時は利用不可の旨を返します）。
 - コスト・レート制限対策として、ユーザーごとに30秒のクールダウンがあります。
-- 回答生成には `OPENROUTER_QA_MODEL`（未設定時は `OPENROUTER_MODEL`）が使われます。文脈統合を伴うため、抽出用の軽量モデルより高性能なモデルの指定を推奨します。
+- `/ask` のキーワード抽出・回答生成はどちらも `OPENROUTER_QA_MODEL`（デフォルト: `openai/gpt-oss-20b:free`）を使います。別のモデルを使いたい場合はこの環境変数で上書きできます。
 - **プライバシー注意**: `/ask` 実行時、検索でヒットしたScrapboxページ本文の抜粋がOpenRouter（および背後のモデルプロバイダ）に送信されます。非公開プロジェクトで運用する場合は、OpenRouterアカウント側のデータ利用設定（学習利用のオプトアウト等）を確認してください。
 
 ### 1日1回のランダム記事配信
@@ -177,8 +177,8 @@ Render → Environment から設定します。
 | `KEYWORD` | — | 絞り込みキーワード（空で全メッセージ対象） | `保存` |
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3キー。設定するとYouTubeの説明欄を取得しクレジット抽出が有効になる | `AIza...` |
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
-| `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `nvidia/nemotron-nano-9b-v2:free`）。クレジット抽出と `/ask` のキーワード抽出に使う | `google/gemini-flash-1.5` |
-| `OPENROUTER_QA_MODEL` | — | `/ask` の回答生成に使うモデル名（未設定時は `OPENROUTER_MODEL` にフォールバック）。文脈統合を伴うため高性能モデルを推奨 | `anthropic/claude-3.5-haiku` |
+| `OPENROUTER_MODEL` | — | クレジット抽出で使うモデル名（デフォルト: `nvidia/nemotron-nano-9b-v2:free`） | `google/gemini-flash-1.5` |
+| `OPENROUTER_QA_MODEL` | — | `/ask` のキーワード抽出・回答生成で使うモデル名（デフォルト: `openai/gpt-oss-20b:free`） | `anthropic/claude-3.5-haiku` |
 | `RAG_TOP_N` | — | `/ask` で文脈に含める検索ヒット上位件数（デフォルト5、範囲1〜20） | `5` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
 | `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |

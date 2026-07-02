@@ -7,9 +7,8 @@ import requests
 import scrapbox_search
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'nvidia/nemotron-nano-9b-v2:free')
-# 回答生成は文脈統合を伴うため、抽出用の軽量モデルとは別に指定できる。未設定なら共通モデルにフォールバック。
-OPENROUTER_QA_MODEL = os.environ.get('OPENROUTER_QA_MODEL', '') or OPENROUTER_MODEL
+# /ask 関連（キーワード抽出・回答生成）で使うモデル。デフォルトは gpt-oss-20b（無料）。
+OPENROUTER_QA_MODEL = os.environ.get('OPENROUTER_QA_MODEL', '') or 'openai/gpt-oss-20b:free'
 
 CONTEXT_TOTAL_MAX_CHARS = 8000
 
@@ -104,7 +103,7 @@ def _chat(model, system, user, max_tokens, timeout):
 
 def extract_keywords(question):
     """質問文からキーワードのリストを返す。失敗・0件時は空リスト（呼び出し側でフォールバック）"""
-    content, error = _chat(OPENROUTER_MODEL, _KEYWORD_SYSTEM_PROMPT, question[:500], max_tokens=100, timeout=10)
+    content, error = _chat(OPENROUTER_QA_MODEL, _KEYWORD_SYSTEM_PROMPT, question[:500], max_tokens=100, timeout=10)
     if error or not content:
         return []
     keywords = []
