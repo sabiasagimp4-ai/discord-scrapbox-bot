@@ -72,20 +72,13 @@ def _fallback_keywords(question):
     return [text] if text else []
 
 
-def _chat(model, system, user, max_tokens, timeout):
-    """OpenRouter Chat Completions を1回呼ぶ。戻り値: (content, error)"""
+def _chat_messages(model, messages, max_tokens, timeout):
+    """OpenRouter Chat Completions を messages 配列で1回呼ぶ。戻り値: (content, error)"""
     try:
         r = requests.post(
             'https://openrouter.ai/api/v1/chat/completions',
             headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}'},
-            json={
-                'model': model,
-                'messages': [
-                    {'role': 'system', 'content': system},
-                    {'role': 'user', 'content': user},
-                ],
-                'max_tokens': max_tokens,
-            },
+            json={'model': model, 'messages': messages, 'max_tokens': max_tokens},
             timeout=timeout,
         )
     except Exception as e:
@@ -99,6 +92,15 @@ def _chat(model, system, user, max_tokens, timeout):
     if not content or not content.strip():
         return None, '空応答'
     return content, None
+
+
+def _chat(model, system, user, max_tokens, timeout):
+    """system + user の1往復で _chat_messages を呼ぶ薄いラッパ。戻り値: (content, error)"""
+    messages = [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': user},
+    ]
+    return _chat_messages(model, messages, max_tokens, timeout)
 
 
 def extract_keywords(question):
@@ -117,10 +119,17 @@ def extract_keywords(question):
     return keywords
 
 
-def generate_answer(question, context, model):
-    """コンテキストを根拠に回答を生成する。戻り値: (answer, error)"""
+def generate_answer(question, context, model, history=None):
+    """コンテキストを根拠に回答を生成する。
+    history があれば会話継続として過去の (質問, 回答) をLLMに渡す。戻り値: (answer, error)
+    """
+    messages = [{'role': 'system', 'content': _QA_SYSTEM_PROMPT}]
+    for turn in (history or []):
+        messages.append({'role': 'user', 'content': turn['q']})
+        messages.append({'role': 'assistant', 'content': turn['a']})
     user = f'質問: {question}\n\n<<<Scrapbox抜粋>>>\n{context}\n<<<抜粋ここまで>>>'
-    return _chat(model, _QA_SYSTEM_PROMPT, user, max_tokens=1000, timeout=20)
+    messages.append({'role': 'user', 'content': user})
+    return _chat_messages(model, messages, max_tokens=1000, timeout=20)
 
 
 def build_rag_context(pages_with_text, total_max_chars=CONTEXT_TOTAL_MAX_CHARS):
@@ -147,19 +156,26 @@ def _parallel_map(fn, items, max_workers=5):
         return list(ex.map(fn, items))
 
 
-def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
+def answer_question(question, project, sid, top_n=5, per_page_chars=1000, history=None):
     """RAG Q&Aのオーケストレーション。すべての障害を戻り値で表現し例外を漏らさない。
+    history（過去の {'q','a'} のリスト）があれば会話継続として扱う。
     戻り値: (answer, sources, error)
       error: None=成功 / 'auth' / 'search' / 'no_hits' / 'llm:<詳細>' / その他
     """
     if not OPENROUTER_API_KEY:
         return None, [], 'OPENROUTER_API_KEYが未設定です'
 
+    # 追い質問（例:「その人の他の作品は？」）は代名詞で固有名詞が無いことが多いので、
+    # 直前の質問文を検索・キーワード抽出に混ぜて文脈を補う。
+    search_source = question
+    if history:
+        search_source = f"{history[-1]['q']} {question}"
+
     # 1. キーワード抽出。LLM抽出（失敗しうる）と決定論的フォールバックを常に併用し、
     #    どちらかが空でも固有名詞が検索されるようにする。並列検索なので語が増えても遅くならない。
-    llm_keywords = [_clean_query(k) for k in extract_keywords(question)]
+    llm_keywords = [_clean_query(k) for k in extract_keywords(search_source)]
     keywords = []
-    for k in llm_keywords + _fallback_keywords(question):
+    for k in llm_keywords + _fallback_keywords(search_source):
         if k and k not in keywords:
             keywords.append(k)
     keywords = keywords[:6]
@@ -201,8 +217,8 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
     if not context:
         return None, [], f'no_hits:{searched}'
 
-    # 6. 回答生成
-    answer, error = generate_answer(question, context, OPENROUTER_QA_MODEL)
+    # 6. 回答生成（会話継続なら履歴も渡す）
+    answer, error = generate_answer(question, context, OPENROUTER_QA_MODEL, history=history)
     if error:
         return None, sources, f'llm:{error}'
     return answer, sources, None
