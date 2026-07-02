@@ -213,6 +213,7 @@ def save_to_scrapbox(url, overwrite=False):
             'Origin': 'https://scrapbox.io',
             'Referer': 'https://scrapbox.io',
         },
+        timeout=10,
     )
     return r.status_code, r.text[:300], title, embedded_thumbnail
 
@@ -290,14 +291,48 @@ def process_urls(urls, overwrite=False):
 
 @tasks.loop(time=dt_time(hour=21, minute=0, tzinfo=JST))
 async def send_daily_random_article():
-    article = await asyncio.to_thread(fetch_random_article)
-    if not article:
-        return
-    channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
-    embed = _build_result_embed(
-        article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
-    )
-    await channel.send(content='📚 今日のランダム記事', embed=embed)
+    try:
+        article = await asyncio.to_thread(fetch_random_article)
+        if not article:
+            return
+        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        embed = _build_result_embed(
+            article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
+        )
+        await channel.send(content='📚 今日のランダム記事', embed=embed)
+    except Exception as e:
+        print(f'[send_daily_random_article] error: {e}')
+
+
+def run_daily_health_checks():
+    """必須・任意の外部サービス接続を確認する。戻り値: 異常があった項目のメッセージのリスト（正常時は空リスト）"""
+    checks = [
+        ('Scrapbox', name_linker.check_connection, (SCRAPBOX_PROJECT, SCRAPBOX_SID)),
+        ('YouTube Data API', check_youtube_connection, ()),
+        ('OpenRouter(AI)', credit_extractor.check_connection, ()),
+        ('Gyazo', gyazo_uploader.check_connection, ()),
+    ]
+    problems = []
+    for label, func, args in checks:
+        try:
+            ok, detail = func(*args)
+        except Exception as e:
+            ok, detail = False, str(e)
+        if ok is False:
+            problems.append(f'❌ {label}: {detail}')
+    return problems
+
+
+@tasks.loop(time=dt_time(hour=8, minute=0, tzinfo=JST))
+async def daily_health_check():
+    try:
+        problems = await asyncio.to_thread(run_daily_health_checks)
+        if not problems:
+            return
+        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        await channel.send('⚠️ 日次ヘルスチェックで異常を検出しました\n' + '\n'.join(problems))
+    except Exception as e:
+        print(f'[daily_health_check] error: {e}')
 
 
 @client.event
@@ -311,6 +346,8 @@ async def on_ready():
         await tree.sync()
     if not send_daily_random_article.is_running():
         send_daily_random_article.start()
+    if not daily_health_check.is_running():
+        daily_health_check.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
