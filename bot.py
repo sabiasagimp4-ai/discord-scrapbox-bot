@@ -17,6 +17,7 @@ import gyazo_uploader
 import name_linker
 import playlist_loader
 import rag_qa
+import scrapbox_search
 
 REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
 
@@ -38,6 +39,11 @@ _recently_saved_titles = set()
 RAG_TOP_N = 8
 ASK_COOLDOWN_SECONDS = 30
 _ask_cooldowns = {}
+# /ask の会話継続用。回答メッセージに作ったスレッドのIDをキーに、そのスレッドでの
+# 過去のやり取り（{'q','a'} のリスト）を保持する。再起動で消えるのは許容。
+ASK_HISTORY_MAX = 5
+ASK_THREADS_MAX = 200
+_ask_threads = {}
 
 JST = timezone(timedelta(hours=9))
 
@@ -588,6 +594,12 @@ async def ask_command(interaction: discord.Interaction, question: str):
         await interaction.followup.send(_format_ask_error(error, cleaned))
         return
 
+    prefix = '⚠️ 質問が長いため500文字で切り詰めました\n' if truncated else None
+    sent = await interaction.followup.send(content=prefix, embed=_build_answer_embed(answer, sources))
+    await _start_ask_thread(sent, cleaned, answer)
+
+
+def _build_answer_embed(answer, sources):
     description = answer if len(answer) <= 4096 else answer[:4000] + '\n…(省略)'
     embed = discord.Embed(title='回答', description=description, color=discord.Color.teal())
     if sources:
@@ -600,9 +612,95 @@ async def ask_command(interaction: discord.Interaction, question: str):
             source_text = source_text[:1000] + '\n…(省略)'
         embed.add_field(name='出典', value=source_text, inline=False)
     embed.set_footer(text=f'model: {rag_qa.OPENROUTER_QA_MODEL}')
+    return embed
 
-    prefix = '⚠️ 質問が長いため500文字で切り詰めました\n' if truncated else None
-    await interaction.followup.send(content=prefix, embed=embed)
+
+async def _start_ask_thread(message, question, answer):
+    """回答メッセージにスレッドを作り、会話継続の起点として初回のやり取りを記録する。"""
+    try:
+        thread = await message.create_thread(name=question[:90] or '/ask', auto_archive_duration=60)
+    except Exception as e:
+        print(f'[ask thread] create failed: {e}')
+        return
+    if len(_ask_threads) >= ASK_THREADS_MAX:
+        _ask_threads.pop(next(iter(_ask_threads)), None)
+    _ask_threads[thread.id] = [{'q': question, 'a': answer}]
+    try:
+        await thread.send('このスレッドで続けて質問できます（「その人の他の作品は？」のような追い質問もOK）。')
+    except Exception:
+        pass
+
+
+async def handle_ask_followup(message):
+    """/ask で作られたスレッド内の追い質問を、これまでの会話履歴付きで処理する。"""
+    history = _ask_threads.get(message.channel.id)
+    if history is None or not rag_qa.OPENROUTER_API_KEY:
+        return
+
+    now = time.time()
+    remaining = ASK_COOLDOWN_SECONDS - (now - _ask_cooldowns.get(message.author.id, 0))
+    if remaining > 0:
+        await message.reply(f'連続実行はできません。あと{int(remaining) + 1}秒お待ちください')
+        return
+
+    cleaned, _ = _clean_question(message.content)
+    if not cleaned:
+        return
+    _ask_cooldowns[message.author.id] = now
+
+    async with message.channel.typing():
+        answer, sources, error = await asyncio.to_thread(
+            rag_qa.answer_question, cleaned, SCRAPBOX_PROJECT, SCRAPBOX_SID, RAG_TOP_N,
+            history=history[-ASK_HISTORY_MAX:],
+        )
+    if error:
+        await message.reply(_format_ask_error(error, cleaned))
+        return
+
+    await message.reply(embed=_build_answer_embed(answer, sources))
+    history.append({'q': cleaned, 'a': answer})
+    del history[:-ASK_HISTORY_MAX]
+
+
+@tree.command(name='search', description='Scrapboxをキーワード検索します')
+@discord.app_commands.describe(query='検索キーワード')
+async def search_command(interaction: discord.Interaction, query: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    cleaned = query.strip()
+    if not cleaned:
+        await interaction.response.send_message('検索キーワードを入力してください', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    pages, error = await asyncio.to_thread(
+        scrapbox_search.search_pages, SCRAPBOX_PROJECT, SCRAPBOX_SID, cleaned, 20
+    )
+    if error == 'auth':
+        await interaction.followup.send(_format_error_reply(403, ''))
+        return
+    if error:
+        await interaction.followup.send('❌ Scrapbox検索でエラーが発生しました')
+        return
+    if not pages:
+        await interaction.followup.send(f'「{cleaned}」に一致するページは見つかりませんでした')
+        return
+
+    links = []
+    seen = set()
+    for p in pages:
+        title = p['title']
+        if title in seen:
+            continue
+        seen.add(title)
+        links.append(f'[{title}](https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)})')
+    description = '\n'.join(links)
+    if len(description) > 4096:
+        description = description[:4000] + '\n…(省略)'
+    embed = discord.Embed(title=f'検索結果: {cleaned}', description=description, color=discord.Color.blue())
+    embed.set_footer(text=f'{len(links)}件')
+    await interaction.followup.send(embed=embed)
 
 
 alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')
@@ -681,9 +779,13 @@ async def alias_list_command(interaction: discord.Interaction):
 
 @client.event
 async def on_message(message):
-    print(f'[msg] ch={message.channel.id} author={message.author} content={message.content[:50]!r}')
     if message.author.bot:
         return
+    # /ask で作られたスレッド内の追い質問は会話継続として処理する
+    if isinstance(message.channel, discord.Thread) and message.channel.id in _ask_threads:
+        await handle_ask_followup(message)
+        return
+    print(f'[msg] ch={message.channel.id} author={message.author} content={message.content[:50]!r}')
     if message.channel.id != CHANNEL_ID:
         print(f'[skip] channel mismatch: {message.channel.id} != {CHANNEL_ID}')
         return

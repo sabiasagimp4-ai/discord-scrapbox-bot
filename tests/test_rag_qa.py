@@ -165,7 +165,7 @@ class AnswerQuestionTests(unittest.TestCase):
     def test_snippet_used_when_body_fetch_fails(self):
         captured = {}
 
-        def fake_generate(question, context, model):
+        def fake_generate(question, context, model, history=None):
             captured['context'] = context
             return '回答', None
 
@@ -175,6 +175,66 @@ class AnswerQuestionTests(unittest.TestCase):
                     with patch.object(rag_qa, 'generate_answer', side_effect=fake_generate):
                         rag_qa.answer_question('q', 'proj', 'sid')
         self.assertIn('スニペット代替', captured['context'])
+
+    def test_followup_mixes_previous_question_into_search(self):
+        captured = []
+
+        def fake_search(project, sid, kw):
+            captured.append(kw)
+            return [], None
+
+        history = [{'q': '山口駿とは誰？', 'a': '映像作家です'}]
+        with patch.object(rag_qa, 'extract_keywords', return_value=[]):
+            with patch('rag_qa.scrapbox_search.search_pages', side_effect=fake_search):
+                rag_qa.answer_question('その人の作品は？', 'proj', 'sid', history=history)
+        # 追い質問は代名詞なので、直前の質問（山口駿）を検索語に混ぜて文脈を補う
+        joined = ' '.join(captured)
+        self.assertIn('山口駿', joined)
+
+    def test_followup_passes_history_to_generation(self):
+        captured = {}
+
+        def fake_generate(question, context, model, history=None):
+            captured['history'] = history
+            return '回答', None
+
+        history = [{'q': '前の質問', 'a': '前の回答'}]
+        with patch.object(rag_qa, 'extract_keywords', return_value=['山田']):
+            with patch('rag_qa.scrapbox_search.search_pages', return_value=([{'title': 'A', 'snippet': 's'}], None)):
+                with patch('rag_qa.scrapbox_search.fetch_page_text', return_value='本文'):
+                    with patch.object(rag_qa, 'generate_answer', side_effect=fake_generate):
+                        rag_qa.answer_question('追い質問', 'proj', 'sid', history=history)
+        self.assertEqual(captured['history'], history)
+
+
+class GenerateAnswerTests(unittest.TestCase):
+    def test_history_is_included_as_prior_turns(self):
+        captured = {}
+
+        def fake_chat_messages(model, messages, max_tokens, timeout):
+            captured['messages'] = messages
+            return '回答', None
+
+        history = [{'q': '山口駿とは？', 'a': '映像作家'}]
+        with patch.object(rag_qa, '_chat_messages', side_effect=fake_chat_messages):
+            rag_qa.generate_answer('その作品は？', 'ctx', 'model', history=history)
+        roles = [m['role'] for m in captured['messages']]
+        # system → 過去(user, assistant) → 今回(user)
+        self.assertEqual(roles, ['system', 'user', 'assistant', 'user'])
+        self.assertEqual(captured['messages'][1]['content'], '山口駿とは？')
+        self.assertEqual(captured['messages'][2]['content'], '映像作家')
+
+    def test_no_history_is_single_turn(self):
+        captured = {}
+
+        def fake_chat_messages(model, messages, max_tokens, timeout):
+            captured['messages'] = messages
+            return '回答', None
+
+        with patch.object(rag_qa, '_chat_messages', side_effect=fake_chat_messages):
+            rag_qa.generate_answer('質問', 'ctx', 'model')
+        roles = [m['role'] for m in captured['messages']]
+        self.assertEqual(roles, ['system', 'user'])
 
 
 if __name__ == '__main__':
