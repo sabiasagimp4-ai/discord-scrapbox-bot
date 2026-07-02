@@ -545,8 +545,9 @@ def _clean_question(question):
 def _format_ask_error(error, query):
     if error == 'auth':
         return _format_error_reply(403, '')
-    if error == 'no_hits':
-        return f'Scrapbox内に該当する情報が見つかりませんでした（検索語: {query}）'
+    if error.startswith('no_hits'):
+        _, _, searched = error.partition(':')
+        return f'Scrapbox内に該当する情報が見つかりませんでした（検索語: {searched or query}）'
     if error == 'search':
         return '❌ Scrapbox検索でエラーが発生しました'
     if error.startswith('llm:'):
