@@ -69,6 +69,26 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
   - `❌` で始まる場合はOpenRouterへの問い合わせ自体が失敗しています（リクエストエラー・ステータス異常・レスポンス形式異常など）。可能であれば原因の特定に使えるLLMの生レスポンスも併せて表示されます。
   - `(抽出結果なし。LLMの生レスポンス↓)` の場合は問い合わせ自体は成功したが該当情報が見つからなかったことを示します。表示されるLLMの生レスポンスを見ることで、プロンプトやモデルの精度の問題か、本当にクレジット情報が無いのかを判断できます。
 
+### `/write` スラッシュコマンド
+
+指定チャンネルで `/write` を実行するとポップアップ（モーダル）が開き、「タイトル」と「本文」を入力してScrapboxに新しいページを作成できます。URLを介さず、Discordから直接メモや記事を書き込みたい場合に使います。本文は改行可・4000文字までです。作成したページは新規ページ投稿の自動通知で二重に通知されないよう自動的に除外されます。
+
+### `/ask` スラッシュコマンド
+
+指定チャンネルで `/ask question:<質問文>` を実行すると、Scrapboxに蓄積された内容に基づいて質問に回答します（RAG方式）。処理の流れは以下の通りです。
+
+1. 質問文をLLM（OpenRouter）で複数の検索キーワードに分解する
+2. 各キーワードでScrapbox全文検索を並列実行し、多くのキーワードでヒットしたページほど関連度が高いとみなして順位付けする
+3. 上位ページの本文を文脈としてLLMに渡し、その範囲内で回答を生成する
+4. 回答本文・根拠になった**出典ページへのリンク**・使用モデル名を返信する
+
+回答はScrapboxに書かれている情報のみを根拠とし、該当情報が無い場合は「見つかりませんでした」と答えます。必ず出典リンクが添えられるので、回答の裏を取れます。
+
+- **利用には `OPENROUTER_API_KEY` が必須**です（未設定時は利用不可の旨を返します）。
+- コスト・レート制限対策として、ユーザーごとに30秒のクールダウンがあります。
+- 回答生成には `OPENROUTER_QA_MODEL`（未設定時は `OPENROUTER_MODEL`）が使われます。文脈統合を伴うため、抽出用の軽量モデルより高性能なモデルの指定を推奨します。
+- **プライバシー注意**: `/ask` 実行時、検索でヒットしたScrapboxページ本文の抜粋がOpenRouter（および背後のモデルプロバイダ）に送信されます。非公開プロジェクトで運用する場合は、OpenRouterアカウント側のデータ利用設定（学習利用のオプトアウト等）を確認してください。
+
 ### 1日1回のランダム記事配信
 
 毎日21:00（日本時間）に、Scrapboxプロジェクト内の全ページからランダムに1件選び、指定チャンネルに自動送信します。タイトル・本文冒頭の抜粋・サムネイル（あれば）を含むEmbedで表示されます。
@@ -155,7 +175,9 @@ Render → Environment から設定します。
 | `KEYWORD` | — | 絞り込みキーワード（空で全メッセージ対象） | `保存` |
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3キー。設定するとYouTubeの説明欄を取得しクレジット抽出が有効になる | `AIza...` |
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
-| `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `nvidia/nemotron-nano-9b-v2:free`） | `google/gemini-flash-1.5` |
+| `OPENROUTER_MODEL` | — | OpenRouterで使用するモデル名（デフォルト: `nvidia/nemotron-nano-9b-v2:free`）。クレジット抽出と `/ask` のキーワード抽出に使う | `google/gemini-flash-1.5` |
+| `OPENROUTER_QA_MODEL` | — | `/ask` の回答生成に使うモデル名（未設定時は `OPENROUTER_MODEL` にフォールバック）。文脈統合を伴うため高性能モデルを推奨 | `anthropic/claude-3.5-haiku` |
+| `RAG_TOP_N` | — | `/ask` で文脈に含める検索ヒット上位件数（デフォルト5、範囲1〜20） | `5` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
 | `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |
 | `GYAZO_ACCESS_TOKEN` | — | サムネイル画像をGyazoにアップロードし直すためのアクセストークン。未設定時は取得した画像URLを直接埋め込む | `xxxxxxxx-xxxx-...` |
@@ -182,6 +204,8 @@ discord-scrapbox-bot/
 ├── bot.py                      # メインロジック
 ├── credit_extractor.py         # LLMによるクレジット抽出
 ├── name_linker.py               # Scrapbox人物名リンク照合
+├── scrapbox_search.py           # Scrapbox全文検索・本文取得・結果マージ（/ask用）
+├── rag_qa.py                    # /ask のRAG（キーワード抽出・並列検索・回答生成）
 ├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
 ├── playlist_loader.py           # YouTube再生リストの動画URL展開
 ├── tests/                       # 単体テスト（unittest）
@@ -224,7 +248,7 @@ python bot.py
 
 ## テスト
 
-`bot.py`・`name_linker.py`・`credit_extractor.py`・`gyazo_uploader.py`・`playlist_loader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。`bot.py` は `discord.py` をインポートするため、テスト実行には `pip install -r requirements.txt` が必要です。
+`bot.py`・`name_linker.py`・`credit_extractor.py`・`scrapbox_search.py`・`rag_qa.py`・`gyazo_uploader.py`・`playlist_loader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。`bot.py` は `discord.py` をインポートするため、テスト実行には `pip install -r requirements.txt` が必要です。
 
 ```bash
 python -m unittest discover -s tests -v

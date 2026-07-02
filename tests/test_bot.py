@@ -354,5 +354,41 @@ class FetchRandomArticleTests(unittest.TestCase):
         self.assertEqual(result['description'], '本文冒頭')
 
 
+class CleanQuestionTests(unittest.TestCase):
+    def test_strips_control_characters(self):
+        cleaned, truncated = bot._clean_question('質問\x00\x07です')
+        self.assertEqual(cleaned, '質問です')
+        self.assertFalse(truncated)
+
+    def test_keeps_newlines(self):
+        cleaned, _ = bot._clean_question('1行目\n2行目')
+        self.assertEqual(cleaned, '1行目\n2行目')
+
+    def test_truncates_over_500_chars(self):
+        cleaned, truncated = bot._clean_question('あ' * 600)
+        self.assertEqual(len(cleaned), 500)
+        self.assertTrue(truncated)
+
+    def test_whitespace_only_becomes_empty(self):
+        cleaned, _ = bot._clean_question('   ')
+        self.assertEqual(cleaned, '')
+
+
+class FormatAskErrorTests(unittest.TestCase):
+    def test_auth_reuses_403_message(self):
+        self.assertIn('Cookie', bot._format_ask_error('auth', 'q'))
+
+    def test_no_hits_includes_query(self):
+        message = bot._format_ask_error('no_hits', '山田太郎')
+        self.assertIn('見つかりませんでした', message)
+        self.assertIn('山田太郎', message)
+
+    def test_search_error(self):
+        self.assertIn('検索', bot._format_ask_error('search', 'q'))
+
+    def test_llm_error_shows_detail(self):
+        self.assertIn('429', bot._format_ask_error('llm:ステータス(429)', 'q'))
+
+
 if __name__ == '__main__':
     unittest.main()
