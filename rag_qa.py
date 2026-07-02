@@ -193,7 +193,7 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
         top,
     )
     pages_with_text = [
-        {'title': item['title'], 'text': text or item.get('snippet', '')}
+        {'title': item['title'], 'text': text or scrapbox_search.clean_page_lines([item.get('snippet', '')])}
         for item, text in zip(top, texts)
     ]
 

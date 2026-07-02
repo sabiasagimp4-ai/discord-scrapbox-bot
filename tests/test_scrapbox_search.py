@@ -63,14 +63,26 @@ class SearchPagesTests(unittest.TestCase):
 
 
 class FetchPageTextTests(unittest.TestCase):
-    def test_success_joins_line_texts(self):
+    def test_drops_title_line_and_joins_body(self):
         data = {'lines': [{'text': 'タイトル'}, {'text': '本文1'}, {'text': '本文2'}]}
         with patch('scrapbox_search.requests.get', return_value=FakeResponse(data)):
             text = scrapbox_search.fetch_page_text('proj', 'sid', '記事A')
-        self.assertEqual(text, 'タイトル\n本文1\n本文2')
+        # 1行目のタイトルは落とし、本文だけを結合する
+        self.assertEqual(text, '本文1\n本文2')
+
+    def test_cleans_noise_before_returning(self):
+        data = {'lines': [
+            {'text': 'タイトル'},
+            {'text': '[山田太郎]が監督'},
+            {'text': '[https://youtu.be/abc]'},
+            {'text': ''},
+        ]}
+        with patch('scrapbox_search.requests.get', return_value=FakeResponse(data)):
+            text = scrapbox_search.fetch_page_text('proj', 'sid', '記事A')
+        self.assertEqual(text, '山田太郎が監督')
 
     def test_truncates_to_max_chars(self):
-        data = {'lines': [{'text': 'あ' * 2000}]}
+        data = {'lines': [{'text': 'タイトル'}, {'text': 'あ' * 2000}]}
         with patch('scrapbox_search.requests.get', return_value=FakeResponse(data)):
             text = scrapbox_search.fetch_page_text('proj', 'sid', '記事A', max_chars=100)
         self.assertTrue(text.endswith('…(省略)'))
@@ -85,6 +97,38 @@ class FetchPageTextTests(unittest.TestCase):
         with patch('scrapbox_search.requests.get', side_effect=Exception('boom')):
             text = scrapbox_search.fetch_page_text('proj', 'sid', '記事A')
         self.assertEqual(text, '')
+
+
+class CleanPageLinesTests(unittest.TestCase):
+    def test_unwraps_page_link(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['[山田太郎]が監督']), '山田太郎が監督')
+
+    def test_drops_url_only_line(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['[https://youtu.be/abc]']), '')
+
+    def test_keeps_label_of_external_link(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['[https://example.com 公式サイト]']), '公式サイト')
+
+    def test_unwraps_decoration(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['[* 重要な見出し]']), '重要な見出し')
+
+    def test_removes_bare_url(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['詳細は https://example.com にある']), '詳細は にある')
+
+    def test_strips_hashtag_symbol_keeps_word(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['#ドキュメンタリー 作品']), 'ドキュメンタリー 作品')
+
+    def test_drops_code_block_header(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['code:main.py', '  print(1)']), 'print(1)')
+
+    def test_drops_empty_and_symbol_only_lines(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['', '---', '[https://gyazo.com/xyz]']), '')
+
+    def test_handles_nested_bold(self):
+        self.assertEqual(scrapbox_search.clean_page_lines(['[[太字]]']), '太字')
+
+    def test_preserves_credit_line(self):
+        self.assertEqual(scrapbox_search.clean_page_lines([' Direction: [山田太郎]']), 'Direction: 山田太郎')
 
 
 class MergeSearchResultsTests(unittest.TestCase):
