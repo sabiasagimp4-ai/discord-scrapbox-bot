@@ -47,6 +47,32 @@ def _clean_query(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+# 疑問文の語尾・助詞を長いものから順に剥がして中心の名詞を取り出すためのパターン。
+# LLMによるキーワード抽出が失敗（無料モデルのレート制限等）しても、
+# 固有名詞だけは確実に検索できるようにするための決定論的フォールバック。
+_QUESTION_NOISE = [
+    'とはどんな人', 'とはどんな', 'とは誰ですか', 'とは何ですか', 'とは誰', 'とは何',
+    'って誰ですか', 'って何ですか', 'って誰', 'って何',
+    'について教えて', 'について知りたい', 'について', 'を教えて', 'を知りたい',
+    'は誰ですか', 'は何ですか', 'は誰', 'は何',
+    'とは', 'ですか', '教えて',
+]
+
+
+def _fallback_keywords(question):
+    """LLMを使わず質問文から中心となる語を取り出す。
+    「Xとは誰？」→「X」のように疑問文の定型的な語尾を除去する。
+    英字名（例: Shun Yamaguchi）の内部スペースは残す（Scrapboxはスペース区切りをAND検索するため）。
+    """
+    text = _clean_query(question)
+    for noise in _QUESTION_NOISE:
+        text = text.replace(noise, ' ')
+    # 語尾に残りがちな単独の疑問詞を除去
+    text = re.sub(r'(誰|何|どれ|どの|どんな)\s*$', '', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip()
+    return [text] if text else []
+
+
 def _chat(model, system, user, max_tokens, timeout):
     """OpenRouter Chat Completions を1回呼ぶ。戻り値: (content, error)"""
     try:
@@ -130,14 +156,16 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
     if not OPENROUTER_API_KEY:
         return None, [], 'OPENROUTER_API_KEYが未設定です'
 
-    # 1. キーワード抽出（失敗時は質問文そのもので検索）
-    keywords = [_clean_query(k) for k in extract_keywords(question)]
-    keywords = [k for k in keywords if k]
+    # 1. キーワード抽出。LLM抽出（失敗しうる）と決定論的フォールバックを常に併用し、
+    #    どちらかが空でも固有名詞が検索されるようにする。並列検索なので語が増えても遅くならない。
+    llm_keywords = [_clean_query(k) for k in extract_keywords(question)]
+    keywords = []
+    for k in llm_keywords + _fallback_keywords(question):
+        if k and k not in keywords:
+            keywords.append(k)
+    keywords = keywords[:6]
     if not keywords:
-        fallback = _clean_query(question)
-        keywords = [fallback] if fallback else []
-    if not keywords:
-        return None, [], 'no_hits'
+        return None, [], 'no_hits:'
 
     # 2. キーワードごとに並列検索
     search_results = _parallel_map(
@@ -151,10 +179,12 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
             return None, [], 'auth'
         return None, [], 'search'
 
+    searched = ','.join(keywords)
+
     # 3. マージして関連度順に
     merged = scrapbox_search.merge_search_results(successes)
     if not merged:
-        return None, [], 'no_hits'
+        return None, [], f'no_hits:{searched}'
     top = merged[:top_n]
 
     # 4. 上位ページの本文を並列取得（取れなければスニペットで代替）
@@ -170,7 +200,7 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000):
     # 5. コンテキスト構築
     context, sources = build_rag_context(pages_with_text)
     if not context:
-        return None, [], 'no_hits'
+        return None, [], f'no_hits:{searched}'
 
     # 6. 回答生成
     answer, error = generate_answer(question, context, OPENROUTER_QA_MODEL)

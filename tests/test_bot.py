@@ -383,6 +383,12 @@ class FormatAskErrorTests(unittest.TestCase):
         self.assertIn('見つかりませんでした', message)
         self.assertIn('山田太郎', message)
 
+    def test_no_hits_shows_searched_terms_over_raw_query(self):
+        # 実際に検索したキーワードがある場合はそちらを表示する
+        message = bot._format_ask_error('no_hits:山口駿,Shun Yamaguchi', '山口駿とは誰？')
+        self.assertIn('山口駿,Shun Yamaguchi', message)
+        self.assertNotIn('とは誰', message)
+
     def test_search_error(self):
         self.assertIn('検索', bot._format_ask_error('search', 'q'))
 

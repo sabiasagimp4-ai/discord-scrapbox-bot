@@ -36,6 +36,23 @@ class ExtractKeywordsTests(unittest.TestCase):
             self.assertEqual(rag_qa.extract_keywords('q'), [])
 
 
+class FallbackKeywordsTests(unittest.TestCase):
+    def test_strips_toha_dare_suffix(self):
+        self.assertEqual(rag_qa._fallback_keywords('山口駿とは誰？'), ['山口駿'])
+
+    def test_preserves_english_name_internal_space(self):
+        self.assertEqual(rag_qa._fallback_keywords('Shun Yamaguchiとは誰？'), ['Shun Yamaguchi'])
+
+    def test_strips_ha_dare_suffix(self):
+        self.assertEqual(rag_qa._fallback_keywords('監督は誰'), ['監督'])
+
+    def test_strips_nitsuite_oshiete(self):
+        self.assertEqual(rag_qa._fallback_keywords('山田太郎について教えて'), ['山田太郎'])
+
+    def test_noise_only_returns_empty(self):
+        self.assertEqual(rag_qa._fallback_keywords('？？？'), [])
+
+
 class BuildRagContextTests(unittest.TestCase):
     def test_includes_all_when_within_limit(self):
         pages = [{'title': 'A', 'text': 'foo'}, {'title': 'B', 'text': 'bar'}]
@@ -75,7 +92,7 @@ class AnswerQuestionTests(unittest.TestCase):
                 with patch.object(rag_qa, 'generate_answer') as mock_gen:
                     answer, sources, error = rag_qa.answer_question('q', 'proj', 'sid')
         mock_gen.assert_not_called()
-        self.assertEqual(error, 'no_hits')
+        self.assertTrue(error.startswith('no_hits'))
 
     def test_all_queries_auth_error_returns_auth(self):
         with patch.object(rag_qa, 'extract_keywords', return_value=['山田', '太郎']):
@@ -99,8 +116,31 @@ class AnswerQuestionTests(unittest.TestCase):
         with patch.object(rag_qa, 'extract_keywords', return_value=[]):
             with patch('rag_qa.scrapbox_search.search_pages', side_effect=fake_search):
                 rag_qa.answer_question('監督は誰？', 'proj', 'sid')
-        # キーワード抽出が空なら質問文（句読点除去済み）で検索する
-        self.assertEqual(captured, ['監督は誰'])
+        # キーワード抽出が空でも、決定論的フォールバックで疑問文語尾を削った語を検索する
+        self.assertEqual(captured, ['監督'])
+
+    def test_combines_llm_keywords_with_fallback(self):
+        captured = []
+
+        def fake_search(project, sid, kw):
+            captured.append(kw)
+            return [], None
+
+        with patch.object(rag_qa, 'extract_keywords', return_value=['X']):
+            with patch('rag_qa.scrapbox_search.search_pages', side_effect=fake_search):
+                rag_qa.answer_question('Yとは誰？', 'proj', 'sid')
+        # LLM由来の 'X' と、フォールバックで抽出した 'Y' の両方を検索する
+        self.assertIn('X', captured)
+        self.assertIn('Y', captured)
+
+    def test_no_hits_error_carries_searched_terms(self):
+        with patch.object(rag_qa, 'extract_keywords', return_value=['山口駿']):
+            with patch('rag_qa.scrapbox_search.search_pages', return_value=([], None)):
+                with patch.object(rag_qa, 'generate_answer') as mock_gen:
+                    answer, sources, error = rag_qa.answer_question('山口駿とは誰？', 'proj', 'sid')
+        mock_gen.assert_not_called()
+        self.assertTrue(error.startswith('no_hits:'))
+        self.assertIn('山口駿', error)
 
     def test_success_path_returns_answer_and_sources(self):
         with patch.object(rag_qa, 'extract_keywords', return_value=['山田']):
