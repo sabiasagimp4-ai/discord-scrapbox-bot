@@ -16,6 +16,7 @@ import credit_extractor
 import gyazo_uploader
 import name_linker
 import playlist_loader
+import rag_qa
 
 REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
 
@@ -33,6 +34,10 @@ _pages_cache = {'pages': [], 'ts': 0.0}
 _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
+
+RAG_TOP_N = max(1, min(20, int(os.environ.get('RAG_TOP_N') or '5')))
+ASK_COOLDOWN_SECONDS = 30
+_ask_cooldowns = {}
 
 JST = timezone(timedelta(hours=9))
 
@@ -222,6 +227,25 @@ def save_to_scrapbox(url, overwrite=False):
     if r.status_code == 200:
         _recently_saved_titles.add(title)
     return r.status_code, r.text[:300], title, embedded_thumbnail
+
+
+def write_page_to_scrapbox(title, body_text):
+    """Scrapboxに任意テキストのページを書き込む。戻り値: (status_code, body)"""
+    lines = [title] + (body_text.splitlines() if body_text else [])
+    payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
+    r = requests.post(
+        f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}.json',
+        files={'import-file': ('pages.json', payload, 'application/json')},
+        headers={
+            'Cookie': f'connect.sid={SCRAPBOX_SID}',
+            'Origin': 'https://scrapbox.io',
+            'Referer': 'https://scrapbox.io',
+        },
+        timeout=10,
+    )
+    if r.status_code == 200:
+        _recently_saved_titles.add(title)
+    return r.status_code, r.text[:300]
 
 
 def fetch_random_article():
@@ -467,6 +491,117 @@ async def debug_command(interaction: discord.Interaction, url: str):
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
     await interaction.followup.send(embed=embed)
+
+
+class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
+    page_title = discord.ui.TextInput(
+        label='タイトル',
+        placeholder='ページのタイトルを入力',
+        required=True,
+        max_length=200,
+    )
+    body = discord.ui.TextInput(
+        label='本文',
+        style=discord.TextStyle.paragraph,
+        placeholder='本文を入力（改行可）',
+        required=False,
+        max_length=4000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        title = self.page_title.value.strip()
+        body_text = self.body.value or ''
+        try:
+            status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text)
+        except Exception as e:
+            await interaction.followup.send(f'❌ エラー: {e}')
+            return
+        if status == 200:
+            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+            embed = _build_result_embed(title, scrapbox_url, '', body_text[:200] if body_text else '', discord.Color.green())
+            await interaction.followup.send('✅ 保存しました', embed=embed)
+        else:
+            await interaction.followup.send(_format_error_reply(status, body))
+
+
+@tree.command(name='write', description='Scrapboxに新しいページを作成します')
+async def write_command(interaction: discord.Interaction):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    await interaction.response.send_modal(WriteModal())
+
+
+def _clean_question(question):
+    """制御文字を除去し500文字で切り詰める。戻り値: (cleaned, truncated)"""
+    cleaned = ''.join(ch for ch in question if ch >= ' ' or ch == '\n').strip()
+    truncated = len(cleaned) > 500
+    if truncated:
+        cleaned = cleaned[:500]
+    return cleaned, truncated
+
+
+def _format_ask_error(error, query):
+    if error == 'auth':
+        return _format_error_reply(403, '')
+    if error == 'no_hits':
+        return f'Scrapbox内に該当する情報が見つかりませんでした（検索語: {query}）'
+    if error == 'search':
+        return '❌ Scrapbox検索でエラーが発生しました'
+    if error.startswith('llm:'):
+        return f'❌ AI応答の生成に失敗しました（{error[4:]}）'
+    return f'❌ エラー: {error}'
+
+
+@tree.command(name='ask', description='Scrapboxの内容に基づいて質問に答えます')
+@discord.app_commands.describe(question='質問文')
+async def ask_command(interaction: discord.Interaction, question: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    if not rag_qa.OPENROUTER_API_KEY:
+        await interaction.response.send_message('OPENROUTER_API_KEYが未設定のため利用できません', ephemeral=True)
+        return
+
+    now = time.time()
+    remaining = ASK_COOLDOWN_SECONDS - (now - _ask_cooldowns.get(interaction.user.id, 0))
+    if remaining > 0:
+        await interaction.response.send_message(
+            f'連続実行はできません。あと{int(remaining) + 1}秒お待ちください', ephemeral=True
+        )
+        return
+
+    cleaned, truncated = _clean_question(question)
+    if not cleaned:
+        await interaction.response.send_message('質問を入力してください', ephemeral=True)
+        return
+
+    _ask_cooldowns[interaction.user.id] = now
+    await interaction.response.defer()
+
+    answer, sources, error = await asyncio.to_thread(
+        rag_qa.answer_question, cleaned, SCRAPBOX_PROJECT, SCRAPBOX_SID, RAG_TOP_N
+    )
+    if error:
+        await interaction.followup.send(_format_ask_error(error, cleaned))
+        return
+
+    description = answer if len(answer) <= 4096 else answer[:4000] + '\n…(省略)'
+    embed = discord.Embed(title='回答', description=description, color=discord.Color.teal())
+    if sources:
+        links = [
+            f'[{title}](https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)})'
+            for title in sources
+        ]
+        source_text = '\n'.join(links)
+        if len(source_text) > 1024:
+            source_text = source_text[:1000] + '\n…(省略)'
+        embed.add_field(name='出典', value=source_text, inline=False)
+    embed.set_footer(text=f'model: {rag_qa.OPENROUTER_QA_MODEL}')
+
+    prefix = '⚠️ 質問が長いため500文字で切り詰めました\n' if truncated else None
+    await interaction.followup.send(content=prefix, embed=embed)
 
 
 alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')

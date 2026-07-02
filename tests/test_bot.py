@@ -211,6 +211,37 @@ class SaveToScrapboxTests(unittest.TestCase):
         self.assertIn(' Direction: [山田太郎]', sent_payload['pages'][0]['lines'])
 
 
+class WritePageToScrapboxTests(unittest.TestCase):
+    def setUp(self):
+        bot._recently_saved_titles.clear()
+
+    def tearDown(self):
+        bot._recently_saved_titles.clear()
+
+    @patch('bot.requests.post')
+    def test_success_returns_200_and_records_title(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=200, text='ok')
+        status, _ = bot.write_page_to_scrapbox('新しいページ', '本文1行目\n2行目')
+        self.assertEqual(status, 200)
+        self.assertIn('新しいページ', bot._recently_saved_titles)
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['新しいページ', '本文1行目', '2行目'])
+
+    @patch('bot.requests.post')
+    def test_empty_body_writes_title_only(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=200, text='ok')
+        bot.write_page_to_scrapbox('タイトルのみ', '')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['タイトルのみ'])
+
+    @patch('bot.requests.post')
+    def test_error_response_does_not_record_title(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=403, text='Forbidden')
+        status, _ = bot.write_page_to_scrapbox('失敗ページ', '本文')
+        self.assertEqual(status, 403)
+        self.assertNotIn('失敗ページ', bot._recently_saved_titles)
+
+
 class ProcessUrlsTests(unittest.TestCase):
     def test_mixed_results_build_correct_embeds_and_errors(self):
         def fake_save(url, overwrite=False):
@@ -321,6 +352,42 @@ class FetchRandomArticleTests(unittest.TestCase):
         self.assertEqual(result['title'], '記事A')
         self.assertEqual(result['thumbnail'], 'https://example.com/thumb.png')
         self.assertEqual(result['description'], '本文冒頭')
+
+
+class CleanQuestionTests(unittest.TestCase):
+    def test_strips_control_characters(self):
+        cleaned, truncated = bot._clean_question('質問\x00\x07です')
+        self.assertEqual(cleaned, '質問です')
+        self.assertFalse(truncated)
+
+    def test_keeps_newlines(self):
+        cleaned, _ = bot._clean_question('1行目\n2行目')
+        self.assertEqual(cleaned, '1行目\n2行目')
+
+    def test_truncates_over_500_chars(self):
+        cleaned, truncated = bot._clean_question('あ' * 600)
+        self.assertEqual(len(cleaned), 500)
+        self.assertTrue(truncated)
+
+    def test_whitespace_only_becomes_empty(self):
+        cleaned, _ = bot._clean_question('   ')
+        self.assertEqual(cleaned, '')
+
+
+class FormatAskErrorTests(unittest.TestCase):
+    def test_auth_reuses_403_message(self):
+        self.assertIn('Cookie', bot._format_ask_error('auth', 'q'))
+
+    def test_no_hits_includes_query(self):
+        message = bot._format_ask_error('no_hits', '山田太郎')
+        self.assertIn('見つかりませんでした', message)
+        self.assertIn('山田太郎', message)
+
+    def test_search_error(self):
+        self.assertIn('検索', bot._format_ask_error('search', 'q'))
+
+    def test_llm_error_shows_detail(self):
+        self.assertIn('429', bot._format_ask_error('llm:ステータス(429)', 'q'))
 
 
 if __name__ == '__main__':
