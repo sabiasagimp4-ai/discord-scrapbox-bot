@@ -35,7 +35,7 @@ _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
 
-RAG_TOP_N = max(1, min(20, int(os.environ.get('RAG_TOP_N') or '5')))
+RAG_TOP_N = 8
 ASK_COOLDOWN_SECONDS = 30
 _ask_cooldowns = {}
 

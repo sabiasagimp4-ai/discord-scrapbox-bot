@@ -7,8 +7,8 @@ import requests
 import scrapbox_search
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-# /ask 関連（キーワード抽出・回答生成）で使うモデル。デフォルトは gpt-oss-20b（無料）。
-OPENROUTER_QA_MODEL = os.environ.get('OPENROUTER_QA_MODEL', '') or 'openai/gpt-oss-20b:free'
+# /ask 関連（キーワード抽出・回答生成）で使うモデル。gpt-oss-20b（無料）に固定。
+OPENROUTER_QA_MODEL = 'openai/gpt-oss-20b:free'
 
 CONTEXT_TOTAL_MAX_CHARS = 8000
 
