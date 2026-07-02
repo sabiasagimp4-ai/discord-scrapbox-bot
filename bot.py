@@ -224,6 +224,25 @@ def save_to_scrapbox(url, overwrite=False):
     return r.status_code, r.text[:300], title, embedded_thumbnail
 
 
+def write_page_to_scrapbox(title, body_text):
+    """Scrapboxに任意テキストのページを書き込む。戻り値: (status_code, body)"""
+    lines = [title] + (body_text.splitlines() if body_text else [])
+    payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
+    r = requests.post(
+        f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}.json',
+        files={'import-file': ('pages.json', payload, 'application/json')},
+        headers={
+            'Cookie': f'connect.sid={SCRAPBOX_SID}',
+            'Origin': 'https://scrapbox.io',
+            'Referer': 'https://scrapbox.io',
+        },
+        timeout=10,
+    )
+    if r.status_code == 200:
+        _recently_saved_titles.add(title)
+    return r.status_code, r.text[:300]
+
+
 def fetch_random_article():
     """Scrapboxプロジェクト内の全ページからランダムに1件選ぶ。
     戻り値: {'title': str, 'scrapbox_url': str, 'thumbnail': str, 'description': str} または該当ページが無い場合はNone"""
@@ -467,6 +486,46 @@ async def debug_command(interaction: discord.Interaction, url: str):
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
     await interaction.followup.send(embed=embed)
+
+
+class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
+    page_title = discord.ui.TextInput(
+        label='タイトル',
+        placeholder='ページのタイトルを入力',
+        required=True,
+        max_length=200,
+    )
+    body = discord.ui.TextInput(
+        label='本文',
+        style=discord.TextStyle.paragraph,
+        placeholder='本文を入力（改行可）',
+        required=False,
+        max_length=4000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        title = self.page_title.value.strip()
+        body_text = self.body.value or ''
+        try:
+            status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text)
+        except Exception as e:
+            await interaction.followup.send(f'❌ エラー: {e}')
+            return
+        if status == 200:
+            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+            embed = _build_result_embed(title, scrapbox_url, '', body_text[:200] if body_text else '', discord.Color.green())
+            await interaction.followup.send('✅ 保存しました', embed=embed)
+        else:
+            await interaction.followup.send(_format_error_reply(status, body))
+
+
+@tree.command(name='write', description='Scrapboxに新しいページを作成します')
+async def write_command(interaction: discord.Interaction):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    await interaction.response.send_modal(WriteModal())
 
 
 alias_group = discord.app_commands.Group(name='alias', description='人物名の表記ゆれを管理します')

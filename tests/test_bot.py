@@ -211,6 +211,37 @@ class SaveToScrapboxTests(unittest.TestCase):
         self.assertIn(' Direction: [山田太郎]', sent_payload['pages'][0]['lines'])
 
 
+class WritePageToScrapboxTests(unittest.TestCase):
+    def setUp(self):
+        bot._recently_saved_titles.clear()
+
+    def tearDown(self):
+        bot._recently_saved_titles.clear()
+
+    @patch('bot.requests.post')
+    def test_success_returns_200_and_records_title(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=200, text='ok')
+        status, _ = bot.write_page_to_scrapbox('新しいページ', '本文1行目\n2行目')
+        self.assertEqual(status, 200)
+        self.assertIn('新しいページ', bot._recently_saved_titles)
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['新しいページ', '本文1行目', '2行目'])
+
+    @patch('bot.requests.post')
+    def test_empty_body_writes_title_only(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=200, text='ok')
+        bot.write_page_to_scrapbox('タイトルのみ', '')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['タイトルのみ'])
+
+    @patch('bot.requests.post')
+    def test_error_response_does_not_record_title(self, mock_post):
+        mock_post.return_value = FakeResponse(status_code=403, text='Forbidden')
+        status, _ = bot.write_page_to_scrapbox('失敗ページ', '本文')
+        self.assertEqual(status, 403)
+        self.assertNotIn('失敗ページ', bot._recently_saved_titles)
+
+
 class ProcessUrlsTests(unittest.TestCase):
     def test_mixed_results_build_correct_embeds_and_errors(self):
         def fake_save(url, overwrite=False):
