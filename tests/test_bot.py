@@ -432,16 +432,39 @@ class AppendNoteToScrapboxTests(unittest.TestCase):
         # 既存ページへの追記は新規ページ通知の抑制対象にしない
         self.assertNotIn('案件X', bot._recently_saved_titles)
 
-    def test_creates_page_when_missing_and_records_title(self):
+    def test_missing_page_without_allow_create_returns_not_found(self):
+        # タイポで迷子ページが量産されるのを防ぐため、明示しない限り新規作成しない
+        missing = {'persistent': False, 'lines': []}
+        with patch('bot.requests.get', return_value=FakeResponse(missing)):
+            with patch('bot.requests.post') as mock_post:
+                status, _ = bot.append_note_to_scrapbox('存在しない案件', 'メモ', 'user')
+        mock_post.assert_not_called()
+        self.assertEqual(status, 'not_found')
+
+    def test_creates_page_when_missing_and_allow_create(self):
         missing = {'persistent': False, 'lines': []}
         with patch('bot.requests.get', return_value=FakeResponse(missing)):
             with patch('bot.requests.post', return_value=FakeResponse(status_code=200, text='ok')) as mock_post:
-                status, _ = bot.append_note_to_scrapbox('新規案件', 'メモ', 'user')
+                status, _ = bot.append_note_to_scrapbox('新規案件', 'メモ', 'user', allow_create=True)
         self.assertEqual(status, 200)
         payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
         self.assertEqual(payload['pages'][0]['lines'][0], '新規案件')
         # 新規作成なので新規ページ通知の二重通知を抑制する
         self.assertIn('新規案件', bot._recently_saved_titles)
+
+    def test_note_inserted_before_trailing_tag_block(self):
+        # 雛形ページでは末尾タグの下ではなく「メモ・感想」セクション配下に入る
+        existing = {'persistent': True, 'lines': [
+            {'text': '案件X'}, {'text': '[* メモ・感想]'}, {'text': ''}, {'text': '#Karure制作'},
+        ]}
+        with patch('bot.requests.get', return_value=FakeResponse(existing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=200, text='ok')) as mock_post:
+                bot.append_note_to_scrapbox('案件X', '進捗メモ', 'user')
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        # タグはページ最下部のまま、メモは見出しの直下に入る
+        self.assertEqual(lines[-1], '#Karure制作')
+        self.assertEqual(lines[1], '[* メモ・感想]')
+        self.assertEqual(lines[3], '  進捗メモ')
 
     def test_get_failure_returns_error_without_post(self):
         with patch('bot.requests.get', side_effect=Exception('timeout')):
@@ -455,9 +478,30 @@ class AppendNoteToScrapboxTests(unittest.TestCase):
         missing = {'persistent': False, 'lines': []}
         with patch('bot.requests.get', return_value=FakeResponse(missing)):
             with patch('bot.requests.post', return_value=FakeResponse(status_code=500, text='error')):
-                status, _ = bot.append_note_to_scrapbox('失敗案件', 'メモ', 'user')
+                status, _ = bot.append_note_to_scrapbox('失敗案件', 'メモ', 'user', allow_create=True)
         self.assertEqual(status, 500)
         self.assertNotIn('失敗案件', bot._recently_saved_titles)
+
+
+class NoteInsertIndexTests(unittest.TestCase):
+    def test_template_body_inserts_under_memo_section(self):
+        body = ['[* 概要]', '', '[* データ]', '', '[* メモ・感想]', '', '#Karure制作']
+        self.assertEqual(bot._note_insert_index(body), 5)
+
+    def test_no_tags_appends_at_end(self):
+        body = ['本文1', '本文2']
+        self.assertEqual(bot._note_insert_index(body), 2)
+
+    def test_multiple_trailing_tags_and_blanks_are_kept_at_bottom(self):
+        body = ['本文', '', '#Karure制作 #MV', '#完了']
+        self.assertEqual(bot._note_insert_index(body), 1)
+
+    def test_empty_body_returns_zero(self):
+        self.assertEqual(bot._note_insert_index([]), 0)
+
+    def test_hashtag_in_sentence_is_not_treated_as_tag_line(self):
+        body = ['文中に #タグ がある行']
+        self.assertEqual(bot._note_insert_index(body), 1)
 
 
 class ProjectPageTemplateTests(unittest.TestCase):
@@ -466,7 +510,10 @@ class ProjectPageTemplateTests(unittest.TestCase):
         self.assertIn('[* 概要]', joined)
         self.assertIn('[* データ]', joined)
         self.assertIn('[* メモ・感想]', joined)
-        self.assertIn('#案件', joined)
+
+    def test_template_has_common_karure_link(self):
+        # 全案件ページ共通のリンク。「Karure制作」ページの逆リンク一覧が案件一覧として機能する
+        self.assertEqual(bot.PROJECT_PAGE_TEMPLATE[-1], '#Karure制作')
 
 
 class ReactionActionTests(unittest.TestCase):
