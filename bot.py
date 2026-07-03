@@ -44,11 +44,15 @@ _ask_cooldowns = {}
 ASK_HISTORY_MAX = 5
 ASK_THREADS_MAX = 200
 _ask_threads = {}
+# リアクションによる操作。📚系でメッセージ内URLを保存、❓系でメッセージ内容をaskに問い合わせ。
+SAVE_REACTION_EMOJIS = {'📚', '💾', '🔖'}
+ASK_REACTION_EMOJIS = {'❓', '❔'}
 
 JST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.reactions = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
@@ -800,6 +804,70 @@ async def on_message(message):
         return
     results, embeds = await asyncio.to_thread(process_urls, urls)
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
+
+
+def _reaction_action(emoji):
+    """リアクション絵文字から実行するアクションを返す。'save' / 'ask' / None"""
+    if emoji in SAVE_REACTION_EMOJIS:
+        return 'save'
+    if emoji in ASK_REACTION_EMOJIS:
+        return 'ask'
+    return None
+
+
+@client.event
+async def on_raw_reaction_add(payload):
+    # 古いメッセージにも反応できるよう raw イベントを使う
+    if payload.user_id == client.user.id:
+        return
+    if payload.channel_id != CHANNEL_ID:
+        return
+    action = _reaction_action(str(payload.emoji))
+    if action is None:
+        return
+    channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except Exception as e:
+        print(f'[reaction] fetch_message failed: {e}')
+        return
+    if action == 'save':
+        await handle_reaction_save(message)
+    elif action == 'ask':
+        await handle_reaction_ask(message, payload.user_id)
+
+
+async def handle_reaction_save(message):
+    """📚系リアクションが付いたメッセージ内のURLをScrapboxに保存する。"""
+    urls = await asyncio.to_thread(expand_urls, re.findall(r'https?://[^\s<>"]+', message.content))
+    if not urls:
+        return
+    results, embeds = await asyncio.to_thread(process_urls, urls)
+    await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
+
+
+async def handle_reaction_ask(message, reactor_id):
+    """❓系リアクションが付いたメッセージの内容を質問として /ask 相当の回答を返す。"""
+    if not rag_qa.OPENROUTER_API_KEY:
+        return
+    cleaned, _ = _clean_question(message.content)
+    if not cleaned:
+        return
+
+    now = time.time()
+    if ASK_COOLDOWN_SECONDS - (now - _ask_cooldowns.get(reactor_id, 0)) > 0:
+        return
+    _ask_cooldowns[reactor_id] = now
+
+    async with message.channel.typing():
+        answer, sources, error = await asyncio.to_thread(
+            rag_qa.answer_question, cleaned, SCRAPBOX_PROJECT, SCRAPBOX_SID, RAG_TOP_N
+        )
+    if error:
+        await message.reply(_format_ask_error(error, cleaned))
+        return
+    sent = await message.reply(embed=_build_answer_embed(answer, sources))
+    await _start_ask_thread(sent, cleaned, answer)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
