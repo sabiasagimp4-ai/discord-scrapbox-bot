@@ -12,6 +12,7 @@ from discord.ext import tasks
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
+import channel_links
 import credit_extractor
 import gyazo_uploader
 import name_linker
@@ -47,6 +48,10 @@ _ask_threads = {}
 # リアクションによる操作。📚系でメッセージ内URLを保存、❓系でメッセージ内容をaskに問い合わせ。
 SAVE_REACTION_EMOJIS = {'📚', '💾', '🔖'}
 ASK_REACTION_EMOJIS = {'❓', '❔'}
+
+# チャンネル⇔案件ページの紐づけ（channel_links モジュールでScrapboxに永続化）。
+# None は「未読込」を意味し、初回参照時にScrapboxから読み込む。
+_channel_project_links = None
 
 JST = timezone(timedelta(hours=9))
 
@@ -258,7 +263,9 @@ def write_page_to_scrapbox(title, body_text):
     return r.status_code, r.text[:300]
 
 
-# /project create で作る案件ページの雛形（タイトル行は除く）
+# /project create で作る案件ページの雛形（タイトル行は除く）。
+# 全案件ページに共通リンク #Karure制作 を付けることで、「Karure制作」ページの
+# 逆リンク一覧がそのまま案件一覧として機能する。
 PROJECT_PAGE_TEMPLATE = [
     '[* 概要]',
     '',
@@ -266,8 +273,24 @@ PROJECT_PAGE_TEMPLATE = [
     '',
     '[* メモ・感想]',
     '',
-    '#案件',
+    '#Karure制作',
 ]
+
+# 「#タグ」だけで構成される行（ページ末尾のタグブロック判定に使う）
+_TAG_ONLY_RE = re.compile(r'^\s*#\S+(?:\s+#\S+)*\s*$')
+
+
+def _note_insert_index(body_lines):
+    """メモの挿入位置を返す。ページ末尾の空行・タグ行ブロックの直前
+    （＝雛形なら「メモ・感想」セクションの末尾）に挿入し、タグをページ最下部に保つ。"""
+    i = len(body_lines)
+    while i > 0:
+        line = body_lines[i - 1]
+        if not line.strip() or _TAG_ONLY_RE.match(line):
+            i -= 1
+        else:
+            break
+    return i
 
 
 def _build_note_lines(note_text, date_str, author):
@@ -278,8 +301,10 @@ def _build_note_lines(note_text, date_str, author):
     return lines
 
 
-def append_note_to_scrapbox(title, note_text, author):
-    """既存ページの末尾に日付・記入者付きでメモを追記する。ページが無ければ新規作成する。
+def append_note_to_scrapbox(title, note_text, author, allow_create=False):
+    """既存ページに日付・記入者付きでメモを追記する。挿入位置は末尾タグブロックの直前。
+    ページが存在しない場合、allow_create=False なら作成せず 'not_found' を返す
+    （ページ名のタイポで迷子ページが量産されるのを防ぐ）。
     戻り値: (status_code, body)
     """
     try:
@@ -300,8 +325,13 @@ def append_note_to_scrapbox(title, note_text, author):
             page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
             body_lines = page_lines[1:]  # 1行目はタイトル行
 
+    if not existed and not allow_create:
+        return 'not_found', ''
+
     date_str = datetime.now(JST).strftime('%Y-%m-%d')
-    body_lines.extend(_build_note_lines(note_text, date_str, author))
+    note_lines = _build_note_lines(note_text, date_str, author)
+    idx = _note_insert_index(body_lines)
+    body_lines[idx:idx] = note_lines
 
     payload = json.dumps({'pages': [{'title': title, 'lines': [title] + body_lines}]})
     try:
@@ -432,7 +462,7 @@ async def notify_new_pages():
             if title in _recently_saved_titles:
                 _recently_saved_titles.discard(title)
                 continue
-            if title == CREDIT_MAPPING_PAGE:
+            if title == CREDIT_MAPPING_PAGE or title.startswith('bot設定'):
                 continue
             scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
             embed = _build_result_embed(title, scrapbox_url, '', 'Scrapboxに新しいページが投稿されました', discord.Color.gold())
@@ -595,10 +625,52 @@ async def write_command(interaction: discord.Interaction):
     await interaction.response.send_modal(WriteModal())
 
 
+def _get_channel_links_sync():
+    """チャンネル⇔案件ページの紐づけを返す（未読込ならScrapboxから読む）。同期関数。"""
+    global _channel_project_links
+    if _channel_project_links is None:
+        loaded = channel_links.load_links(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        if loaded is None:
+            return {}  # 通信失敗。キャッシュは作らず次回再試行する
+        _channel_project_links = loaded
+    return _channel_project_links
+
+
+def _save_channel_links_sync(links):
+    """紐づけをScrapboxへ保存し、成功したらメモリも更新する。戻り値: 成否"""
+    global _channel_project_links
+    status, _ = channel_links.save_links(SCRAPBOX_PROJECT, SCRAPBOX_SID, links)
+    if status == 200:
+        _channel_project_links = links
+        _recently_saved_titles.add(channel_links.LINKS_PAGE_TITLE)
+        return True
+    return False
+
+
+async def _page_autocomplete(interaction: discord.Interaction, current: str):
+    """既存ページタイトルの入力候補（タイポによる迷子ページ防止）。"""
+    try:
+        pages = await asyncio.to_thread(get_existing_pages)
+    except Exception:
+        return []
+    current_lower = current.lower()
+    choices = []
+    for title in pages:
+        # Discordの制約でChoiceは100文字まで。bot設定ページは候補に出さない
+        if len(title) > 100 or title.startswith('bot設定'):
+            continue
+        if current_lower in title.lower():
+            choices.append(discord.app_commands.Choice(name=title, value=title))
+            if len(choices) >= 25:
+                break
+    return choices
+
+
 class NoteModal(discord.ui.Modal, title='ページに追記'):
-    def __init__(self, page_title):
+    def __init__(self, page_title, allow_create=False):
         super().__init__()
         self.page_title = page_title
+        self.allow_create = allow_create
         self.note = discord.ui.TextInput(
             label=f'{page_title[:40]} への追記',
             style=discord.TextStyle.paragraph,
@@ -608,39 +680,67 @@ class NoteModal(discord.ui.Modal, title='ページに追記'):
         )
         self.add_item(self.note)
 
+    def _recovery_text(self):
+        """失敗時に入力内容を失わせないためのコピー用ブロック"""
+        return f'\n入力内容（コピー用）:\n```\n{self.note.value[:1700]}\n```'
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         author = interaction.user.display_name
         try:
             status, body = await asyncio.to_thread(
-                append_note_to_scrapbox, self.page_title, self.note.value, author
+                append_note_to_scrapbox, self.page_title, self.note.value, author, self.allow_create
             )
         except Exception as e:
-            await interaction.followup.send(f'❌ エラー: {e}')
+            await interaction.followup.send(f'❌ エラー: {e}' + self._recovery_text())
             return
         if status == 200:
             scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(self.page_title)}'
             embed = _build_result_embed(self.page_title, scrapbox_url, '', self.note.value[:200], discord.Color.green())
             await interaction.followup.send('✅ 追記しました', embed=embed)
+        elif status == 'not_found':
+            await interaction.followup.send(
+                f'❌ ページ「{self.page_title}」が見つかりませんでした（タイポ防止のため、存在しないページには追記しません）。\n'
+                f'新しいページとして作成する場合は `/note page:{self.page_title} create:True` を実行してください。'
+                + self._recovery_text()
+            )
         else:
-            await interaction.followup.send(_format_error_reply(status, body))
+            await interaction.followup.send(_format_error_reply(status, body) + self._recovery_text())
 
 
-@tree.command(name='note', description='既存ページの末尾にメモ・感想を追記します（無ければ新規作成）')
-@discord.app_commands.describe(page='追記先のページ名')
-async def note_command(interaction: discord.Interaction, page: str):
+@tree.command(name='note', description='ページにメモ・感想を追記します（このチャンネルに紐づく案件ページには page 省略可）')
+@discord.app_commands.describe(
+    page='追記先のページ名（省略時はこのチャンネルに紐づく案件ページ）',
+    create='ページが存在しない場合に新規作成する',
+)
+async def note_command(interaction: discord.Interaction, page: str = None, create: bool = False):
+    if page is None:
+        links = await asyncio.to_thread(_get_channel_links_sync)
+        page = links.get(interaction.channel_id)
+        if not page:
+            await interaction.response.send_message(
+                'このチャンネルに紐づく案件ページがありません。`page:` でページ名を指定するか、'
+                '`/project link` でこのチャンネルに案件ページを紐づけてください。',
+                ephemeral=True,
+            )
+            return
     page = _normalize_title(page)
     if not page:
         await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
         return
-    await interaction.response.send_modal(NoteModal(page))
+    await interaction.response.send_modal(NoteModal(page, allow_create=create))
+
+
+@note_command.autocomplete('page')
+async def note_page_autocomplete(interaction: discord.Interaction, current: str):
+    return await _page_autocomplete(interaction, current)
 
 
 project_group = discord.app_commands.Group(name='project', description='案件ページを管理します')
 tree.add_command(project_group)
 
 
-@project_group.command(name='create', description='案件ページを雛形付きで作成します')
+@project_group.command(name='create', description='案件ページを雛形付きで作成し、このチャンネルに紐づけます')
 @discord.app_commands.describe(name='案件名（ページタイトルになります）')
 async def project_create_command(interaction: discord.Interaction, name: str):
     name = _normalize_title(name)
@@ -652,16 +752,64 @@ async def project_create_command(interaction: discord.Interaction, name: str):
     exists = await asyncio.to_thread(name_linker.check_page_exists, SCRAPBOX_PROJECT, SCRAPBOX_SID, name)
     scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(name)}'
     if exists:
-        embed = _build_result_embed(name, scrapbox_url, '', '同名のページが既に存在します', discord.Color.blue())
+        embed = _build_result_embed(name, scrapbox_url, '', '同名のページが既に存在します。このチャンネルに紐づけるには /project link を使ってください', discord.Color.blue())
         await interaction.followup.send(embed=embed)
         return
 
     status, body = await asyncio.to_thread(write_page_to_scrapbox, name, '\n'.join(PROJECT_PAGE_TEMPLATE))
-    if status == 200:
-        embed = _build_result_embed(name, scrapbox_url, '', '案件ページを作成しました。/note で追記できます', discord.Color.green())
+    if status != 200:
+        await interaction.followup.send(_format_error_reply(status, body))
+        return
+
+    links = dict(await asyncio.to_thread(_get_channel_links_sync))
+    links[interaction.channel_id] = name
+    linked = await asyncio.to_thread(_save_channel_links_sync, links)
+    note_hint = 'このチャンネルに紐づけました。/note だけで追記できます' if linked else '作成しました（チャンネルへの紐づけ保存には失敗しました。/project link で再試行できます）'
+    embed = _build_result_embed(name, scrapbox_url, '', f'案件ページを作成しました。{note_hint}', discord.Color.green())
+    await interaction.followup.send(embed=embed)
+
+
+@project_group.command(name='link', description='既存の案件ページをこのチャンネルに紐づけます')
+@discord.app_commands.describe(page='紐づける既存ページ名')
+async def project_link_command(interaction: discord.Interaction, page: str):
+    page = _normalize_title(page)
+    if not page:
+        await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    exists = await asyncio.to_thread(name_linker.check_page_exists, SCRAPBOX_PROJECT, SCRAPBOX_SID, page)
+    if not exists:
+        await interaction.followup.send(f'❌ ページ「{page}」が見つかりません（存在するページのみ紐づけできます）')
+        return
+
+    links = dict(await asyncio.to_thread(_get_channel_links_sync))
+    links[interaction.channel_id] = page
+    if await asyncio.to_thread(_save_channel_links_sync, links):
+        scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(page)}'
+        embed = _build_result_embed(page, scrapbox_url, '', 'このチャンネルに紐づけました。/note だけで追記できます', discord.Color.green())
         await interaction.followup.send(embed=embed)
     else:
-        await interaction.followup.send(_format_error_reply(status, body))
+        await interaction.followup.send('❌ 紐づけの保存に失敗しました')
+
+
+@project_link_command.autocomplete('page')
+async def project_link_autocomplete(interaction: discord.Interaction, current: str):
+    return await _page_autocomplete(interaction, current)
+
+
+@project_group.command(name='unlink', description='このチャンネルと案件ページの紐づけを解除します')
+async def project_unlink_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    links = dict(await asyncio.to_thread(_get_channel_links_sync))
+    page = links.pop(interaction.channel_id, None)
+    if page is None:
+        await interaction.followup.send('このチャンネルに紐づいている案件ページはありません')
+        return
+    if await asyncio.to_thread(_save_channel_links_sync, links):
+        await interaction.followup.send(f'「{page}」との紐づけを解除しました')
+    else:
+        await interaction.followup.send('❌ 紐づけ解除の保存に失敗しました')
 
 
 def _clean_question(question):
