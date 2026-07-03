@@ -492,9 +492,6 @@ async def on_ready():
 @tree.command(name='save', description='URLをScrapboxに保存します')
 @discord.app_commands.describe(url='保存したいURL', overwrite='既存ページがあっても上書き保存する')
 async def save_command(interaction: discord.Interaction, url: str, overwrite: bool = False):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
 
     await interaction.response.defer()
     urls = await asyncio.to_thread(expand_urls, [url])
@@ -509,9 +506,6 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
 
 @tree.command(name='status', description='Bot・Scrapbox・外部APIの疎通状況を確認します')
 async def status_command(interaction: discord.Interaction):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
 
     await interaction.response.defer()
     lines = [
@@ -527,9 +521,6 @@ async def status_command(interaction: discord.Interaction):
 @tree.command(name='debug', description='URLのメタデータ取得結果（概要欄・クレジット抽出結果など）を確認します')
 @discord.app_commands.describe(url='確認したいURL')
 async def debug_command(interaction: discord.Interaction, url: str):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
 
     await interaction.response.defer()
     metadata = await asyncio.to_thread(fetch_metadata, url)
@@ -601,9 +592,6 @@ class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
 
 @tree.command(name='write', description='Scrapboxに新しいページを作成します')
 async def write_command(interaction: discord.Interaction):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
     await interaction.response.send_modal(WriteModal())
 
 
@@ -641,9 +629,6 @@ class NoteModal(discord.ui.Modal, title='ページに追記'):
 @tree.command(name='note', description='既存ページの末尾にメモ・感想を追記します（無ければ新規作成）')
 @discord.app_commands.describe(page='追記先のページ名')
 async def note_command(interaction: discord.Interaction, page: str):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
     page = _normalize_title(page)
     if not page:
         await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
@@ -658,9 +643,6 @@ tree.add_command(project_group)
 @project_group.command(name='create', description='案件ページを雛形付きで作成します')
 @discord.app_commands.describe(name='案件名（ページタイトルになります）')
 async def project_create_command(interaction: discord.Interaction, name: str):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
     name = _normalize_title(name)
     if not name:
         await interaction.response.send_message('案件名を入力してください', ephemeral=True)
@@ -707,9 +689,6 @@ def _format_ask_error(error, query):
 @tree.command(name='ask', description='Scrapboxの内容に基づいて質問に答えます')
 @discord.app_commands.describe(question='質問文')
 async def ask_command(interaction: discord.Interaction, question: str):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
     if not rag_qa.OPENROUTER_API_KEY:
         await interaction.response.send_message('OPENROUTER_API_KEYが未設定のため利用できません', ephemeral=True)
         return
@@ -808,9 +787,6 @@ async def handle_ask_followup(message):
 @tree.command(name='search', description='Scrapboxをキーワード検索します')
 @discord.app_commands.describe(query='検索キーワード')
 async def search_command(interaction: discord.Interaction, query: str):
-    if interaction.channel_id != CHANNEL_ID:
-        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
-        return
     cleaned = query.strip()
     if not cleaned:
         await interaction.response.send_message('検索キーワードを入力してください', ephemeral=True)
@@ -851,8 +827,6 @@ tree.add_command(alias_group)
 
 
 def _check_alias_command_allowed(interaction, require_permission):
-    if interaction.channel_id != CHANNEL_ID:
-        return 'このチャンネルでは使えません'
     if not CREDIT_MAPPING_PAGE:
         return 'CREDIT_MAPPING_PAGEが設定されていません'
     if require_permission:
@@ -956,16 +930,16 @@ def _reaction_action(emoji):
 
 @client.event
 async def on_raw_reaction_add(payload):
-    # 古いメッセージにも反応できるよう raw イベントを使う
+    # 古いメッセージにも反応できるよう raw イベントを使う。サーバー内の全チャンネルで有効
     if payload.user_id == client.user.id:
         return
-    if payload.channel_id != CHANNEL_ID:
+    if payload.guild_id is None:
         return
     action = _reaction_action(str(payload.emoji))
     if action is None:
         return
-    channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
     try:
+        channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
     except Exception as e:
         print(f'[reaction] fetch_message failed: {e}')
