@@ -396,5 +396,18 @@ class FormatAskErrorTests(unittest.TestCase):
         self.assertIn('429', bot._format_ask_error('llm:ステータス(429)', 'q'))
 
 
+class ReactionActionTests(unittest.TestCase):
+    def test_save_emojis_map_to_save(self):
+        for emoji in bot.SAVE_REACTION_EMOJIS:
+            self.assertEqual(bot._reaction_action(emoji), 'save')
+
+    def test_ask_emojis_map_to_ask(self):
+        for emoji in bot.ASK_REACTION_EMOJIS:
+            self.assertEqual(bot._reaction_action(emoji), 'ask')
+
+    def test_unrelated_emoji_maps_to_none(self):
+        self.assertIsNone(bot._reaction_action('😀'))
+
+
 if __name__ == '__main__':
     unittest.main()

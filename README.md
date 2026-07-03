@@ -18,6 +18,17 @@ Discordの特定チャンネルで特定キーワードを含むメッセージ�
 [Bot]      保存しました https://scrapbox.io/myproject/動画タイトル
 ```
 
+### リアクションで保存・質問
+
+指定チャンネルのメッセージに絵文字リアクションを付けると、対応する操作が走ります。
+
+| リアクション | 動作 |
+|---|---|
+| 📚 / 💾 / 🔖 | そのメッセージ内のURLをScrapboxに保存する（キーワード不要。「後から保存」に便利） |
+| ❓ / ❔ | そのメッセージの本文を質問とみなして `/ask` 相当の回答を返す（回答スレッドで追い質問も可能） |
+
+古いメッセージのリアクションにも反応します。❓での質問は `OPENROUTER_API_KEY` が必要で、リアクションした人ごとに30秒のクールダウンが適用されます。
+
 ### `/save` スラッシュコマンド
 
 指定チャンネルで `/save url:https://youtu.be/xxxxxx` を実行すると、キーワード不要で同じ保存処理が走ります。実行者名とURLに続けて、タイトル・サムネイル・Scrapboxページへのリンクを含むEmbedが返信されます。
@@ -146,7 +157,7 @@ Bot本体とBotが依存する各サービスへの疎通状況を確認する�
 2. 左メニュー「Bot」→「Add Bot」
 3. **Message Content Intent** をON
 4. トークンをコピー
-5. OAuth2 → URL Generator → Scopes: `bot` + `applications.commands`、Permissions: `Read Messages` + `Send Messages` + `Create Public Threads` + `Send Messages in Threads`（`/ask` の会話継続に必要） → URLでサーバーに招待（`/save`コマンドを使うには `applications.commands` スコープが必須）
+5. OAuth2 → URL Generator → Scopes: `bot` + `applications.commands`、Permissions: `Read Messages` + `Send Messages` + `Read Message History`（リアクション操作に必要） + `Create Public Threads` + `Send Messages in Threads`（`/ask` の会話継続に必要） → URLでサーバーに招待（`/save`コマンドを使うには `applications.commands` スコープが必須）
 
 チャンネルIDはDiscordの設定 → 詳細設定 → **開発者モード** をONにして、チャンネルを右クリック → **IDをコピー** で取得。
 
