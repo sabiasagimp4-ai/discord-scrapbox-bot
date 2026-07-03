@@ -396,6 +396,79 @@ class FormatAskErrorTests(unittest.TestCase):
         self.assertIn('429', bot._format_ask_error('llm:ステータス(429)', 'q'))
 
 
+class BuildNoteLinesTests(unittest.TestCase):
+    def test_single_line_note(self):
+        lines = bot._build_note_lines('良い感じだった', '2026-07-03', 'sabiasagi')
+        self.assertEqual(lines, [' 2026-07-03 sabiasagi', '  良い感じだった'])
+
+    def test_multiline_note_is_indented(self):
+        lines = bot._build_note_lines('1行目\n2行目', '2026-07-03', 'user')
+        self.assertEqual(lines, [' 2026-07-03 user', '  1行目', '  2行目'])
+
+    def test_trailing_whitespace_stripped(self):
+        lines = bot._build_note_lines('本文   ', '2026-07-03', 'user')
+        self.assertEqual(lines[1], '  本文')
+
+
+class AppendNoteToScrapboxTests(unittest.TestCase):
+    def setUp(self):
+        bot._recently_saved_titles.clear()
+
+    def tearDown(self):
+        bot._recently_saved_titles.clear()
+
+    def test_appends_to_existing_page_preserving_body(self):
+        existing = {'persistent': True, 'lines': [{'text': '案件X'}, {'text': '[* 概要]'}, {'text': 'クライアント情報'}]}
+        with patch('bot.requests.get', return_value=FakeResponse(existing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=200, text='ok')) as mock_post:
+                status, _ = bot.append_note_to_scrapbox('案件X', '進捗メモ', 'user')
+        self.assertEqual(status, 200)
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        lines = payload['pages'][0]['lines']
+        # 既存本文が保持され、末尾に日付行+本文が付く
+        self.assertEqual(lines[:3], ['案件X', '[* 概要]', 'クライアント情報'])
+        self.assertTrue(lines[3].startswith(' ') and 'user' in lines[3])
+        self.assertEqual(lines[4], '  進捗メモ')
+        # 既存ページへの追記は新規ページ通知の抑制対象にしない
+        self.assertNotIn('案件X', bot._recently_saved_titles)
+
+    def test_creates_page_when_missing_and_records_title(self):
+        missing = {'persistent': False, 'lines': []}
+        with patch('bot.requests.get', return_value=FakeResponse(missing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=200, text='ok')) as mock_post:
+                status, _ = bot.append_note_to_scrapbox('新規案件', 'メモ', 'user')
+        self.assertEqual(status, 200)
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'][0], '新規案件')
+        # 新規作成なので新規ページ通知の二重通知を抑制する
+        self.assertIn('新規案件', bot._recently_saved_titles)
+
+    def test_get_failure_returns_error_without_post(self):
+        with patch('bot.requests.get', side_effect=Exception('timeout')):
+            with patch('bot.requests.post') as mock_post:
+                status, body = bot.append_note_to_scrapbox('案件X', 'メモ', 'user')
+        mock_post.assert_not_called()
+        self.assertIsNone(status)
+        self.assertEqual(body, 'timeout')
+
+    def test_post_failure_does_not_record_title(self):
+        missing = {'persistent': False, 'lines': []}
+        with patch('bot.requests.get', return_value=FakeResponse(missing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=500, text='error')):
+                status, _ = bot.append_note_to_scrapbox('失敗案件', 'メモ', 'user')
+        self.assertEqual(status, 500)
+        self.assertNotIn('失敗案件', bot._recently_saved_titles)
+
+
+class ProjectPageTemplateTests(unittest.TestCase):
+    def test_template_has_expected_sections(self):
+        joined = '\n'.join(bot.PROJECT_PAGE_TEMPLATE)
+        self.assertIn('[* 概要]', joined)
+        self.assertIn('[* データ]', joined)
+        self.assertIn('[* メモ・感想]', joined)
+        self.assertIn('#案件', joined)
+
+
 class ReactionActionTests(unittest.TestCase):
     def test_save_emojis_map_to_save(self):
         for emoji in bot.SAVE_REACTION_EMOJIS:
