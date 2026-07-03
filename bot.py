@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import requests
-from datetime import time as dt_time, timezone, timedelta
+from datetime import datetime, time as dt_time, timezone, timedelta
 from discord.ext import tasks
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
@@ -256,6 +256,70 @@ def write_page_to_scrapbox(title, body_text):
     if r.status_code == 200:
         _recently_saved_titles.add(title)
     return r.status_code, r.text[:300]
+
+
+# /project create で作る案件ページの雛形（タイトル行は除く）
+PROJECT_PAGE_TEMPLATE = [
+    '[* 概要]',
+    '',
+    '[* データ]',
+    '',
+    '[* メモ・感想]',
+    '',
+    '#案件',
+]
+
+
+def _build_note_lines(note_text, date_str, author):
+    """追記ブロックの行リストを組み立てる。日付・記入者の行の下に本文をインデントで付ける。"""
+    lines = [f' {date_str} {author}']
+    for line in note_text.splitlines():
+        lines.append(f'  {line.rstrip()}')
+    return lines
+
+
+def append_note_to_scrapbox(title, note_text, author):
+    """既存ページの末尾に日付・記入者付きでメモを追記する。ページが無ければ新規作成する。
+    戻り値: (status_code, body)
+    """
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}',
+            headers={'Cookie': f'connect.sid={SCRAPBOX_SID}'},
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+
+    body_lines = []
+    existed = False
+    if r.status_code == 200:
+        data = r.json()
+        if data.get('persistent'):
+            existed = True
+            page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
+            body_lines = page_lines[1:]  # 1行目はタイトル行
+
+    date_str = datetime.now(JST).strftime('%Y-%m-%d')
+    body_lines.extend(_build_note_lines(note_text, date_str, author))
+
+    payload = json.dumps({'pages': [{'title': title, 'lines': [title] + body_lines}]})
+    try:
+        r2 = requests.post(
+            f'https://scrapbox.io/api/page-data/import/{SCRAPBOX_PROJECT}.json',
+            files={'import-file': ('pages.json', payload, 'application/json')},
+            headers={
+                'Cookie': f'connect.sid={SCRAPBOX_SID}',
+                'Origin': 'https://scrapbox.io',
+                'Referer': 'https://scrapbox.io',
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        return None, str(e)
+    if r2.status_code == 200 and not existed:
+        _recently_saved_titles.add(title)
+    return r2.status_code, r2.text[:300]
 
 
 def fetch_random_article():
@@ -541,6 +605,81 @@ async def write_command(interaction: discord.Interaction):
         await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
         return
     await interaction.response.send_modal(WriteModal())
+
+
+class NoteModal(discord.ui.Modal, title='ページに追記'):
+    def __init__(self, page_title):
+        super().__init__()
+        self.page_title = page_title
+        self.note = discord.ui.TextInput(
+            label=f'{page_title[:40]} への追記',
+            style=discord.TextStyle.paragraph,
+            placeholder='データ・メモ・感想などを入力（改行可）',
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        author = interaction.user.display_name
+        try:
+            status, body = await asyncio.to_thread(
+                append_note_to_scrapbox, self.page_title, self.note.value, author
+            )
+        except Exception as e:
+            await interaction.followup.send(f'❌ エラー: {e}')
+            return
+        if status == 200:
+            scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(self.page_title)}'
+            embed = _build_result_embed(self.page_title, scrapbox_url, '', self.note.value[:200], discord.Color.green())
+            await interaction.followup.send('✅ 追記しました', embed=embed)
+        else:
+            await interaction.followup.send(_format_error_reply(status, body))
+
+
+@tree.command(name='note', description='既存ページの末尾にメモ・感想を追記します（無ければ新規作成）')
+@discord.app_commands.describe(page='追記先のページ名')
+async def note_command(interaction: discord.Interaction, page: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    page = _normalize_title(page)
+    if not page:
+        await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
+        return
+    await interaction.response.send_modal(NoteModal(page))
+
+
+project_group = discord.app_commands.Group(name='project', description='案件ページを管理します')
+tree.add_command(project_group)
+
+
+@project_group.command(name='create', description='案件ページを雛形付きで作成します')
+@discord.app_commands.describe(name='案件名（ページタイトルになります）')
+async def project_create_command(interaction: discord.Interaction, name: str):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message('このチャンネルでは使えません', ephemeral=True)
+        return
+    name = _normalize_title(name)
+    if not name:
+        await interaction.response.send_message('案件名を入力してください', ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    exists = await asyncio.to_thread(name_linker.check_page_exists, SCRAPBOX_PROJECT, SCRAPBOX_SID, name)
+    scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(name)}'
+    if exists:
+        embed = _build_result_embed(name, scrapbox_url, '', '同名のページが既に存在します', discord.Color.blue())
+        await interaction.followup.send(embed=embed)
+        return
+
+    status, body = await asyncio.to_thread(write_page_to_scrapbox, name, '\n'.join(PROJECT_PAGE_TEMPLATE))
+    if status == 200:
+        embed = _build_result_embed(name, scrapbox_url, '', '案件ページを作成しました。/note で追記できます', discord.Color.green())
+        await interaction.followup.send(embed=embed)
+    else:
+        await interaction.followup.send(_format_error_reply(status, body))
 
 
 def _clean_question(question):
