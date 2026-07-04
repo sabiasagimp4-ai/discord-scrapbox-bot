@@ -7,11 +7,13 @@ import os
 import threading
 import time
 import requests
+from collections import deque
 from datetime import datetime, time as dt_time, timezone, timedelta
 from discord.ext import tasks
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
+import audit_log
 import channel_links
 import credit_extractor
 import gyazo_uploader
@@ -54,6 +56,48 @@ ASK_REACTION_EMOJIS = {'❓', '❔'}
 _channel_project_links = None
 
 JST = timezone(timedelta(hours=9))
+
+# --- 反証可能性（observability）用の状態 ---
+# 「通知は動いている」「最新コードが動いている」をいつでも検証できるようにする。
+_started_at = time.time()
+GIT_COMMIT = os.environ.get('RENDER_GIT_COMMIT', '')[:7]  # Renderが自動設定。ローカルでは空
+_recent_errors = deque(maxlen=20)   # (unix_ts, source, message)
+_task_last_runs = {}                # タスク名 -> {'ts': unix_ts, 'ok': bool, 'detail': str}
+
+
+def record_error(source, message):
+    """バックグラウンド処理のエラーを記録する。printだけだと沈黙の故障になるため、/statusから参照できるようにする。"""
+    message = str(message)
+    _recent_errors.append((time.time(), source, message[:200]))
+    print(f'[{source}] error: {message}')
+
+
+def _mark_task_run(name, ok, detail=''):
+    _task_last_runs[name] = {'ts': time.time(), 'ok': ok, 'detail': str(detail)[:200]}
+
+
+def _format_uptime(seconds):
+    """稼働秒数を「N日N時間」形式の文字列にする"""
+    minutes = int(seconds) // 60
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f'{days}日{hours}時間'
+    if hours:
+        return f'{hours}時間{minutes}分'
+    return f'{minutes}分'
+
+
+def _audit(action, page, actor, detail=''):
+    """Botの書き込み操作を監査ログ（Scrapbox: bot設定/監査ログ/YYYY-MM）へ記録する。
+    「Botがこのページをいつ・誰の操作で書き換えたか」を事後検証可能にするための機能であり、
+    ログ書込の失敗が本処理を壊してはならない（エラーは記録のみ）。同期関数。"""
+    try:
+        status = audit_log.append_entry(SCRAPBOX_PROJECT, SCRAPBOX_SID, action, page, actor, detail)
+        if status != 200:
+            record_error('audit', f'監査ログ書込失敗({status})')
+    except Exception as e:
+        record_error('audit', e)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -204,7 +248,7 @@ def get_alias_map():
     return _alias_map_cache
 
 
-def save_to_scrapbox(url, overwrite=False):
+def save_to_scrapbox(url, overwrite=False, actor=''):
     metadata = fetch_metadata(url)
     title = metadata['title']
 
@@ -241,10 +285,11 @@ def save_to_scrapbox(url, overwrite=False):
     )
     if r.status_code == 200:
         _recently_saved_titles.add(title)
+        _audit('save', title, actor or '自動保存', url)
     return r.status_code, r.text[:300], title, embedded_thumbnail
 
 
-def write_page_to_scrapbox(title, body_text):
+def write_page_to_scrapbox(title, body_text, actor='', action='write'):
     """Scrapboxに任意テキストのページを書き込む。戻り値: (status_code, body)"""
     lines = [title] + (body_text.splitlines() if body_text else [])
     payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
@@ -260,6 +305,7 @@ def write_page_to_scrapbox(title, body_text):
     )
     if r.status_code == 200:
         _recently_saved_titles.add(title)
+        _audit(action, title, actor)
     return r.status_code, r.text[:300]
 
 
@@ -318,10 +364,12 @@ def append_note_to_scrapbox(title, note_text, author, allow_create=False):
 
     body_lines = []
     existed = False
+    prev_updated = None
     if r.status_code == 200:
         data = r.json()
         if data.get('persistent'):
             existed = True
+            prev_updated = data.get('updated')
             page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
             body_lines = page_lines[1:]  # 1行目はタイトル行
 
@@ -347,8 +395,12 @@ def append_note_to_scrapbox(title, note_text, author, allow_create=False):
         )
     except Exception as e:
         return None, str(e)
-    if r2.status_code == 200 and not existed:
-        _recently_saved_titles.add(title)
+    if r2.status_code == 200:
+        if not existed:
+            _recently_saved_titles.add(title)
+        # 直前のupdated時刻を残す: 同時編集による内容喪失が疑われた際の事後検証に使える
+        detail = f'追記{len(note_lines)}行' + (f' / 直前updated:{prev_updated}' if prev_updated else ' / 新規作成')
+        _audit('note', title, author, detail)
     return r2.status_code, r2.text[:300]
 
 
@@ -406,12 +458,12 @@ def expand_urls(urls):
     return expanded
 
 
-def process_urls(urls, overwrite=False):
+def process_urls(urls, overwrite=False, actor=''):
     """各URLを保存し、(エラーメッセージのリスト, Embedのリスト) を返す"""
     results = []
     embeds = []
     for url in urls:
-        status, body, title, thumbnail = save_to_scrapbox(url, overwrite=overwrite)
+        status, body, title, thumbnail = save_to_scrapbox(url, overwrite=overwrite, actor=actor)
         scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
         if status == 'duplicate':
             embeds.append(_build_result_embed(title, scrapbox_url, thumbnail, '既に保存済みです', discord.Color.blue()))
@@ -434,8 +486,10 @@ async def send_daily_random_article():
             article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
         )
         await channel.send(content='📚 今日のランダム記事', embed=embed)
+        _mark_task_run('日次ランダム記事', True)
     except Exception as e:
-        print(f'[send_daily_random_article] error: {e}')
+        record_error('send_daily_random_article', e)
+        _mark_task_run('日次ランダム記事', False, e)
 
 
 def find_new_titles(known_titles, current_titles):
@@ -450,11 +504,13 @@ async def notify_new_pages():
         current_titles = await asyncio.to_thread(get_existing_pages)
         if _known_page_titles is None:
             _known_page_titles = set(current_titles)
+            _mark_task_run('新規ページ通知', True, '初回ベースライン記録')
             return
 
         new_titles = find_new_titles(_known_page_titles, current_titles)
         _known_page_titles = set(current_titles)
         if not new_titles:
+            _mark_task_run('新規ページ通知', True)
             return
 
         channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
@@ -467,8 +523,10 @@ async def notify_new_pages():
             scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
             embed = _build_result_embed(title, scrapbox_url, '', 'Scrapboxに新しいページが投稿されました', discord.Color.gold())
             await channel.send(embed=embed)
+        _mark_task_run('新規ページ通知', True)
     except Exception as e:
-        print(f'[notify_new_pages] error: {e}')
+        record_error('notify_new_pages', e)
+        _mark_task_run('新規ページ通知', False, e)
 
 
 def run_daily_health_checks():
@@ -495,11 +553,14 @@ async def daily_health_check():
     try:
         problems = await asyncio.to_thread(run_daily_health_checks)
         if not problems:
+            _mark_task_run('日次ヘルスチェック', True)
             return
         channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
         await channel.send('⚠️ 日次ヘルスチェックで異常を検出しました\n' + '\n'.join(problems))
+        _mark_task_run('日次ヘルスチェック', True, f'異常{len(problems)}件を通知')
     except Exception as e:
-        print(f'[daily_health_check] error: {e}')
+        record_error('daily_health_check', e)
+        _mark_task_run('日次ヘルスチェック', False, e)
 
 
 @client.event
@@ -525,7 +586,7 @@ async def save_command(interaction: discord.Interaction, url: str, overwrite: bo
 
     await interaction.response.defer()
     urls = await asyncio.to_thread(expand_urls, [url])
-    results, embeds = await asyncio.to_thread(process_urls, urls, overwrite=overwrite)
+    results, embeds = await asyncio.to_thread(process_urls, urls, overwrite=overwrite, actor=interaction.user.display_name)
     content = f'{interaction.user.display_name}\n{url}'
 
     if embeds:
@@ -545,7 +606,26 @@ async def status_command(interaction: discord.Interaction):
         _format_status_line('OpenRouter(AI)', await asyncio.to_thread(credit_extractor.check_connection)),
         _format_status_line('Gyazo', await asyncio.to_thread(gyazo_uploader.check_connection)),
     ]
+    lines.extend(_build_observability_lines())
     await interaction.followup.send('\n'.join(lines))
+
+
+def _build_observability_lines(now=None):
+    """稼働情報・定期タスクの最終実行・直近エラーを /status 用の行リストにする。
+    「動いているはず」を検証可能な事実に変えるための表示。"""
+    now = now if now is not None else time.time()
+    lines = ['', f'🕒 稼働時間: {_format_uptime(now - _started_at)}' + (f' / version: {GIT_COMMIT}' if GIT_COMMIT else '')]
+    for name, info in _task_last_runs.items():
+        mark = '✅' if info['ok'] else '❌'
+        at = datetime.fromtimestamp(info['ts'], JST).strftime('%m/%d %H:%M')
+        suffix = f'（{info["detail"][:80]}）' if info['detail'] else ''
+        lines.append(f'{mark} {name}: 最終実行 {at}{suffix}')
+    if _recent_errors:
+        lines.append(f'⚠️ 直近エラー（{len(_recent_errors)}件記録）:')
+        for ts, source, message in list(_recent_errors)[-3:]:
+            at = datetime.fromtimestamp(ts, JST).strftime('%m/%d %H:%M')
+            lines.append(f'　{at} [{source}] {message[:100]}')
+    return lines
 
 
 @tree.command(name='debug', description='URLのメタデータ取得結果（概要欄・クレジット抽出結果など）を確認します')
@@ -608,7 +688,7 @@ class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
         title = self.page_title.value.strip()
         body_text = self.body.value or ''
         try:
-            status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text)
+            status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text, interaction.user.display_name)
         except Exception as e:
             await interaction.followup.send(f'❌ エラー: {e}')
             return
@@ -756,7 +836,9 @@ async def project_create_command(interaction: discord.Interaction, name: str):
         await interaction.followup.send(embed=embed)
         return
 
-    status, body = await asyncio.to_thread(write_page_to_scrapbox, name, '\n'.join(PROJECT_PAGE_TEMPLATE))
+    status, body = await asyncio.to_thread(
+        write_page_to_scrapbox, name, '\n'.join(PROJECT_PAGE_TEMPLATE), interaction.user.display_name, 'project-create'
+    )
     if status != 200:
         await interaction.followup.send(_format_error_reply(status, body))
         return
@@ -786,6 +868,7 @@ async def project_link_command(interaction: discord.Interaction, page: str):
     links = dict(await asyncio.to_thread(_get_channel_links_sync))
     links[interaction.channel_id] = page
     if await asyncio.to_thread(_save_channel_links_sync, links):
+        await asyncio.to_thread(_audit, 'project-link', page, interaction.user.display_name, f'channel:{interaction.channel_id}')
         scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(page)}'
         embed = _build_result_embed(page, scrapbox_url, '', 'このチャンネルに紐づけました。/note だけで追記できます', discord.Color.green())
         await interaction.followup.send(embed=embed)
@@ -807,6 +890,7 @@ async def project_unlink_command(interaction: discord.Interaction):
         await interaction.followup.send('このチャンネルに紐づいている案件ページはありません')
         return
     if await asyncio.to_thread(_save_channel_links_sync, links):
+        await asyncio.to_thread(_audit, 'project-unlink', page, interaction.user.display_name, f'channel:{interaction.channel_id}')
         await interaction.followup.send(f'「{page}」との紐づけを解除しました')
     else:
         await interaction.followup.send('❌ 紐づけ解除の保存に失敗しました')
@@ -890,7 +974,7 @@ async def _start_ask_thread(message, question, answer):
     try:
         thread = await message.create_thread(name=question[:90] or '/ask', auto_archive_duration=60)
     except Exception as e:
-        print(f'[ask thread] create failed: {e}')
+        record_error('ask_thread', f'create failed: {e}')
         return
     if len(_ask_threads) >= ASK_THREADS_MAX:
         _ask_threads.pop(next(iter(_ask_threads)), None)
@@ -930,6 +1014,29 @@ async def handle_ask_followup(message):
     await message.reply(embed=_build_answer_embed(answer, sources))
     history.append({'q': cleaned, 'a': answer})
     del history[:-ASK_HISTORY_MAX]
+
+
+@tree.command(name='ask-debug', description='直近の /ask の内部状態（検索キーワード・ヒット・投入コンテキスト）を表示します')
+async def ask_debug_command(interaction: discord.Interaction):
+    trace = rag_qa.last_trace
+    if not trace:
+        await interaction.response.send_message('直近の /ask 実行の記録がありません（Bot再起動後は消えます）', ephemeral=True)
+        return
+
+    at = datetime.fromtimestamp(trace['ts'], JST).strftime('%m/%d %H:%M:%S')
+    embed = discord.Embed(
+        title='直近の /ask 内部トレース',
+        description=f'実行: {at} JST\n質問: {trace["question"][:500]}',
+        color=discord.Color.orange(),
+    )
+    hits_text = '\n'.join(f'・{kw} → {hits}' for kw, hits in trace['hits']) or '(検索前に終了)'
+    embed.add_field(name='検索キーワードとヒット件数', value=hits_text[:1024], inline=False)
+    selected_text = '\n'.join(f'・{title}（スコア{score}）' for title, score in trace['selected']) or '(採用ページなし)'
+    embed.add_field(name='コンテキストに採用したページ', value=selected_text[:1024], inline=False)
+    embed.add_field(name='投入コンテキスト', value=f'{trace["context_chars"]}文字', inline=True)
+    embed.add_field(name='結果', value=(f'エラー: {trace["error"]}'[:1024] if trace['error'] else '回答生成に成功'), inline=True)
+    embed.set_footer(text=f'model: {trace["model"]}')
+    await interaction.response.send_message(embed=embed)
 
 
 @tree.command(name='search', description='Scrapboxをキーワード検索します')
@@ -998,6 +1105,7 @@ async def alias_add_command(interaction: discord.Interaction, canonical: str, al
     if status == 200:
         global _alias_map_cache
         _alias_map_cache = None
+        await asyncio.to_thread(_audit, 'alias-add', CREDIT_MAPPING_PAGE, interaction.user.display_name, f'{canonical} == {alias}')
         await interaction.followup.send(f'{canonical} == {alias} を登録しました')
     else:
         await interaction.followup.send(_format_error_reply(status, body))
@@ -1017,6 +1125,7 @@ async def alias_remove_command(interaction: discord.Interaction, canonical: str,
     if status == 200:
         global _alias_map_cache
         _alias_map_cache = None
+        await asyncio.to_thread(_audit, 'alias-remove', CREDIT_MAPPING_PAGE, interaction.user.display_name, f'{canonical} == {alias}')
         await interaction.followup.send(f'{canonical} == {alias} を削除しました')
     elif status == 404:
         await interaction.followup.send(f'❌ {body}')
@@ -1063,7 +1172,7 @@ async def on_message(message):
     if not urls:
         await message.reply('URLが見つかりませんでした')
         return
-    results, embeds = await asyncio.to_thread(process_urls, urls)
+    results, embeds = await asyncio.to_thread(process_urls, urls, actor=message.author.display_name)
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
 
 
@@ -1090,20 +1199,21 @@ async def on_raw_reaction_add(payload):
         channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
     except Exception as e:
-        print(f'[reaction] fetch_message failed: {e}')
+        record_error('reaction', f'fetch_message failed: {e}')
         return
+    reactor = payload.member.display_name if payload.member else '不明'
     if action == 'save':
-        await handle_reaction_save(message)
+        await handle_reaction_save(message, reactor)
     elif action == 'ask':
         await handle_reaction_ask(message, payload.user_id)
 
 
-async def handle_reaction_save(message):
+async def handle_reaction_save(message, reactor='不明'):
     """📚系リアクションが付いたメッセージ内のURLをScrapboxに保存する。"""
     urls = await asyncio.to_thread(expand_urls, re.findall(r'https?://[^\s<>"]+', message.content))
     if not urls:
         return
-    results, embeds = await asyncio.to_thread(process_urls, urls)
+    results, embeds = await asyncio.to_thread(process_urls, urls, actor=f'リアクション保存:{reactor}')
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
 
 
