@@ -1,10 +1,15 @@
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
 import scrapbox_search
+
+# 直近の answer_question の内部状態（/ask-debug用）。
+# 回答が間違っていた時に「検索が悪い」のか「LLMの捏造」なのかを切り分けられるようにする。
+last_trace = None
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 # /ask 関連（キーワード抽出・回答生成）で使うモデル。gpt-oss-20b（無料）に固定。
@@ -162,8 +167,26 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000, histor
     戻り値: (answer, sources, error)
       error: None=成功 / 'auth' / 'search' / 'no_hits' / 'llm:<詳細>' / その他
     """
+    # /ask-debug 用のトレース。各段階の内部状態を記録し、終了時に last_trace へ公開する
+    trace = {
+        'ts': time.time(),
+        'question': question,
+        'model': OPENROUTER_QA_MODEL,
+        'keywords': [],
+        'hits': [],       # [(keyword, ヒット件数 or 'error:...'), ...]
+        'selected': [],   # [(title, score), ...]
+        'context_chars': 0,
+        'error': None,
+    }
+
+    def done(answer, sources, error):
+        global last_trace
+        trace['error'] = error
+        last_trace = trace
+        return answer, sources, error
+
     if not OPENROUTER_API_KEY:
-        return None, [], 'OPENROUTER_API_KEYが未設定です'
+        return done(None, [], 'OPENROUTER_API_KEYが未設定です')
 
     # 追い質問（例:「その人の他の作品は？」）は代名詞で固有名詞が無いことが多いので、
     # 直前の質問文を検索・キーワード抽出に混ぜて文脈を補う。
@@ -179,28 +202,34 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000, histor
         if k and k not in keywords:
             keywords.append(k)
     keywords = keywords[:6]
+    trace['keywords'] = keywords
     if not keywords:
-        return None, [], 'no_hits:'
+        return done(None, [], 'no_hits:')
 
     # 2. キーワードごとに並列検索
     search_results = _parallel_map(
         lambda kw: scrapbox_search.search_pages(project, sid, kw), keywords
     )
+    trace['hits'] = [
+        (kw, len(pages) if err is None else f'error:{err}')
+        for kw, (pages, err) in zip(keywords, search_results)
+    ]
     successes = [pages for pages, err in search_results if err is None]
     errors = [err for pages, err in search_results if err is not None]
 
     if not successes:
         if errors and all(e == 'auth' for e in errors):
-            return None, [], 'auth'
-        return None, [], 'search'
+            return done(None, [], 'auth')
+        return done(None, [], 'search')
 
     searched = ','.join(keywords)
 
     # 3. マージして関連度順に
     merged = scrapbox_search.merge_search_results(successes)
     if not merged:
-        return None, [], f'no_hits:{searched}'
+        return done(None, [], f'no_hits:{searched}')
     top = merged[:top_n]
+    trace['selected'] = [(item['title'], item['score']) for item in top]
 
     # 4. 上位ページの本文を並列取得（取れなければスニペットで代替）
     texts = _parallel_map(
@@ -214,11 +243,12 @@ def answer_question(question, project, sid, top_n=5, per_page_chars=1000, histor
 
     # 5. コンテキスト構築
     context, sources = build_rag_context(pages_with_text)
+    trace['context_chars'] = len(context)
     if not context:
-        return None, [], f'no_hits:{searched}'
+        return done(None, [], f'no_hits:{searched}')
 
     # 6. 回答生成（会話継続なら履歴も渡す）
     answer, error = generate_answer(question, context, OPENROUTER_QA_MODEL, history=history)
     if error:
-        return None, sources, f'llm:{error}'
-    return answer, sources, None
+        return done(None, sources, f'llm:{error}')
+    return done(answer, sources, None)

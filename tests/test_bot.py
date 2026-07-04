@@ -164,6 +164,9 @@ class SaveToScrapboxTests(unittest.TestCase):
         self._recently_saved_titles_patch = patch.object(bot, '_recently_saved_titles', set())
         self._recently_saved_titles_patch.start()
         self.addCleanup(self._recently_saved_titles_patch.stop)
+        audit_patch = patch.object(bot, '_audit')
+        self.audit_mock = audit_patch.start()
+        self.addCleanup(audit_patch.stop)
 
     def test_duplicate_page_skips_post(self):
         with patch.object(bot, 'fetch_metadata', return_value={'title': '既存記事', 'description': '', 'thumbnail': ''}):
@@ -214,6 +217,9 @@ class SaveToScrapboxTests(unittest.TestCase):
 class WritePageToScrapboxTests(unittest.TestCase):
     def setUp(self):
         bot._recently_saved_titles.clear()
+        audit_patch = patch.object(bot, '_audit')
+        self.audit_mock = audit_patch.start()
+        self.addCleanup(audit_patch.stop)
 
     def tearDown(self):
         bot._recently_saved_titles.clear()
@@ -244,7 +250,7 @@ class WritePageToScrapboxTests(unittest.TestCase):
 
 class ProcessUrlsTests(unittest.TestCase):
     def test_mixed_results_build_correct_embeds_and_errors(self):
-        def fake_save(url, overwrite=False):
+        def fake_save(url, overwrite=False, actor=''):
             return {
                 'https://dup.com': ('duplicate', None, '重複記事', ''),
                 'https://ok.com': (200, 'ok', '新規記事', ''),
@@ -413,6 +419,9 @@ class BuildNoteLinesTests(unittest.TestCase):
 class AppendNoteToScrapboxTests(unittest.TestCase):
     def setUp(self):
         bot._recently_saved_titles.clear()
+        audit_patch = patch.object(bot, '_audit')
+        self.audit_mock = audit_patch.start()
+        self.addCleanup(audit_patch.stop)
 
     def tearDown(self):
         bot._recently_saved_titles.clear()
@@ -514,6 +523,77 @@ class ProjectPageTemplateTests(unittest.TestCase):
     def test_template_has_common_karure_link(self):
         # 全案件ページ共通のリンク。「Karure制作」ページの逆リンク一覧が案件一覧として機能する
         self.assertEqual(bot.PROJECT_PAGE_TEMPLATE[-1], '#Karure制作')
+
+
+class ObservabilityTests(unittest.TestCase):
+    def test_format_uptime_days(self):
+        self.assertEqual(bot._format_uptime(90000), '1日1時間')
+
+    def test_format_uptime_hours(self):
+        self.assertEqual(bot._format_uptime(3900), '1時間5分')
+
+    def test_format_uptime_minutes(self):
+        self.assertEqual(bot._format_uptime(120), '2分')
+
+    def test_record_error_ring_buffer_caps_at_maxlen(self):
+        with patch.object(bot, '_recent_errors', bot.deque(maxlen=3)):
+            for i in range(5):
+                bot.record_error('test', f'err{i}')
+            messages = [m for _, _, m in bot._recent_errors]
+        self.assertEqual(messages, ['err2', 'err3', 'err4'])
+
+    def test_observability_lines_include_task_and_errors(self):
+        with patch.object(bot, '_task_last_runs', {'新規ページ通知': {'ts': 1751500000.0, 'ok': False, 'detail': 'timeout'}}):
+            with patch.object(bot, '_recent_errors', bot.deque([(1751500000.0, 'notify', 'boom')], maxlen=20)):
+                lines = bot._build_observability_lines(now=1751500060.0)
+        joined = '\n'.join(lines)
+        self.assertIn('稼働時間', joined)
+        self.assertIn('❌ 新規ページ通知', joined)
+        self.assertIn('timeout', joined)
+        self.assertIn('[notify] boom', joined)
+
+    def test_audit_failure_is_recorded_not_raised(self):
+        with patch.object(bot, '_recent_errors', bot.deque(maxlen=20)):
+            with patch('bot.audit_log.append_entry', side_effect=Exception('network down')):
+                bot._audit('save', 'ページ', 'user')  # 例外が漏れないこと
+            self.assertEqual(len(bot._recent_errors), 1)
+            self.assertEqual(bot._recent_errors[0][1], 'audit')
+
+
+class AuditWiringTests(unittest.TestCase):
+    def setUp(self):
+        bot._recently_saved_titles.clear()
+        audit_patch = patch.object(bot, '_audit')
+        self.audit_mock = audit_patch.start()
+        self.addCleanup(audit_patch.stop)
+
+    def tearDown(self):
+        bot._recently_saved_titles.clear()
+
+    def test_successful_note_is_audited_with_actor(self):
+        existing = {'persistent': True, 'updated': 1751500000, 'lines': [{'text': '案件X'}, {'text': '本文'}]}
+        with patch('bot.requests.get', return_value=FakeResponse(existing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=200)):
+                bot.append_note_to_scrapbox('案件X', 'メモ', 'sabiasagi')
+        self.audit_mock.assert_called_once()
+        args = self.audit_mock.call_args.args
+        self.assertEqual(args[0], 'note')
+        self.assertEqual(args[1], '案件X')
+        self.assertEqual(args[2], 'sabiasagi')
+        self.assertIn('直前updated:1751500000', args[3])
+
+    def test_failed_note_is_not_audited(self):
+        existing = {'persistent': True, 'lines': [{'text': '案件X'}]}
+        with patch('bot.requests.get', return_value=FakeResponse(existing)):
+            with patch('bot.requests.post', return_value=FakeResponse(status_code=500)):
+                bot.append_note_to_scrapbox('案件X', 'メモ', 'user')
+        self.audit_mock.assert_not_called()
+
+    def test_successful_write_is_audited_with_action(self):
+        with patch('bot.requests.post', return_value=FakeResponse(status_code=200)):
+            bot.write_page_to_scrapbox('新ページ', '本文', 'user', 'project-create')
+        self.audit_mock.assert_called_once()
+        self.assertEqual(self.audit_mock.call_args.args[0], 'project-create')
 
 
 class ReactionActionTests(unittest.TestCase):

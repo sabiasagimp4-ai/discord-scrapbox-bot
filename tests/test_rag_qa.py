@@ -207,6 +207,45 @@ class AnswerQuestionTests(unittest.TestCase):
         self.assertEqual(captured['history'], history)
 
 
+class TraceTests(unittest.TestCase):
+    def setUp(self):
+        self.api_key_patch = patch.object(rag_qa, 'OPENROUTER_API_KEY', 'sk-test')
+        self.api_key_patch.start()
+        self.addCleanup(self.api_key_patch.stop)
+
+    def test_trace_recorded_on_success(self):
+        with patch.object(rag_qa, 'extract_keywords', return_value=['山田']):
+            with patch('rag_qa.scrapbox_search.search_pages', return_value=([{'title': 'A', 'snippet': 's'}], None)):
+                with patch('rag_qa.scrapbox_search.fetch_page_text', return_value='本文'):
+                    with patch.object(rag_qa, 'generate_answer', return_value=('回答', None)):
+                        rag_qa.answer_question('質問', 'proj', 'sid')
+        trace = rag_qa.last_trace
+        self.assertEqual(trace['question'], '質問')
+        self.assertIn('山田', trace['keywords'])
+        self.assertEqual(trace['hits'][0][0], '山田')
+        self.assertEqual(trace['hits'][0][1], 1)
+        # キーワードはLLM抽出('山田')とフォールバック('質問')の2本 → 両方でヒットしたAのスコアは2
+        self.assertEqual(trace['selected'], [('A', 2)])
+        self.assertGreater(trace['context_chars'], 0)
+        self.assertIsNone(trace['error'])
+
+    def test_trace_records_no_hits_error(self):
+        with patch.object(rag_qa, 'extract_keywords', return_value=['山田']):
+            with patch('rag_qa.scrapbox_search.search_pages', return_value=([], None)):
+                rag_qa.answer_question('質問', 'proj', 'sid')
+        trace = rag_qa.last_trace
+        self.assertTrue(trace['error'].startswith('no_hits'))
+        self.assertEqual(trace['hits'][0][1], 0)
+
+    def test_trace_records_search_errors_per_keyword(self):
+        with patch.object(rag_qa, 'extract_keywords', return_value=['山田']):
+            with patch('rag_qa.scrapbox_search.search_pages', return_value=([], 'timeout')):
+                rag_qa.answer_question('質問', 'proj', 'sid')
+        trace = rag_qa.last_trace
+        self.assertEqual(trace['hits'][0][1], 'error:timeout')
+        self.assertEqual(trace['error'], 'search')
+
+
 class GenerateAnswerTests(unittest.TestCase):
     def test_history_is_included_as_prior_turns(self):
         captured = {}
