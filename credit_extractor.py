@@ -4,7 +4,8 @@ import re
 import requests
 
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'nvidia/nemotron-nano-9b-v2:free')
+# クレジット抽出に使うモデル。/ask と同じ gpt-oss-20b（無料）に固定（環境変数での上書きは廃止）。
+OPENROUTER_MODEL = 'openai/gpt-oss-20b:free'
 
 # 役職の具体例リストは、小型モデルが「映像系/音楽系」の境界を判断する錨として残している
 _SYSTEM_PROMPT = (
