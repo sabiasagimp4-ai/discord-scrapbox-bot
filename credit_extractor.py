@@ -6,21 +6,39 @@ import requests
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'nvidia/nemotron-nano-9b-v2:free')
 
+# 役職の具体例リストは、小型モデルが「映像系/音楽系」の境界を判断する錨として残している
 _SYSTEM_PROMPT = (
-    'あなたはYouTubeのMV概要欄から映像制作クレジットを抽出する専門家です。\n'
+    'MV概要欄から映像制作クレジットのみ抽出。\n'
     '\n'
-    'ルール:\n'
-    '1. 概要欄に実際に書かれているクレジットだけを出力する。書かれていない項目は一切出力しない。\n'
-    '2. 映像・ビジュアル制作の役職のみ対象（Direction, Animation, Illustration, 3DCG, VFX, Movie, Design, Jacket, Visualizer, Lyric Motion, Post Effect, Camera, Edit など）。\n'
-    '3. 音楽制作の役職は除外（Music, Lyric, Compose, Arrange, Vocal, Guitar, Recording, Sound, Mastering, Mix Engineer など）。\n'
-    '4. 役職名は概要欄に書かれた表記をそのまま使う。\n'
-    '5. @usernameやURLは出力しない。\n'
-    '6. 映像クレジットが一つも見つからない場合のみ「なし」と答える。\n'
+    '- 記載されたものだけ出力。\n'
+    '- 映像系役職のみ対象（Direction, Animation, Illustration, 3DCG, VFX, Design, Visualizer, Camera, Edit など）。\n'
+    '- 音楽系役職（Music, Lyric, Compose, Vocal, Recording, Mix など）は除外。\n'
+    '- 役職名は原文のまま。\n'
+    '- @username・URLは除外。\n'
+    '- なければ「なし」。\n'
     '\n'
-    '出力例（概要欄にDirectionとIllustrationしかなければこの2行だけ出す）:\n'
-    'Direction: 山田太郎\n'
-    'Illustration: 鈴木花子'
+    '形式:\n'
+    '役職: 名前'
 )
+
+_URL_RE = re.compile(r'https?://\S+')
+_HANDLE_RE = re.compile(r'@[A-Za-z0-9_.]+')
+# 英数字・ひらがな・カタカナ・漢字のいずれかを含む行だけを「意味のある行」とみなす
+_MEANINGFUL_RE = re.compile(r'[0-9A-Za-z぀-ヿ一-鿿]')
+
+
+def clean_description(description):
+    """概要欄からクレジット抽出に寄与しない部分を機械的に削る（LLMへの投入トークン削減）。
+    URL・@ハンドル・空になった括弧・装飾記号だけの行・空行を除去する。"""
+    out = []
+    for raw in description.splitlines():
+        s = _URL_RE.sub('', raw)
+        s = _HANDLE_RE.sub('', s)
+        s = re.sub(r'[(（]\s*[)）]', '', s)  # ハンドル除去で空になった括弧を掃除
+        s = re.sub(r'\s+', ' ', s).strip()
+        if s and _MEANINGFUL_RE.search(s):
+            out.append(s)
+    return '\n'.join(out)
 
 
 def check_connection():
@@ -61,6 +79,7 @@ def extract_credits_debug(description):
     """
     if not OPENROUTER_API_KEY:
         return [], None, 'OPENROUTER_API_KEYが未設定です'
+    description = clean_description(description or '')
     if not description:
         return [], None, '概要欄が空です'
 

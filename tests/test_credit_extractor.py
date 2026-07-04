@@ -70,6 +70,43 @@ class ExtractCreditsTests(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class CleanDescriptionTests(unittest.TestCase):
+    def test_removes_urls(self):
+        result = credit_extractor.clean_description('視聴はこちら https://youtu.be/xxx から')
+        self.assertEqual(result, '視聴はこちら から')
+
+    def test_removes_handles_and_empty_parens(self):
+        result = credit_extractor.clean_description('Illustration: 鈴木花子 (@hanako_art)')
+        self.assertEqual(result, 'Illustration: 鈴木花子')
+
+    def test_removes_divider_and_empty_lines(self):
+        text = 'Direction: 山田太郎\n──────────\n\n★☆★\n3DCG: 佐藤次郎'
+        result = credit_extractor.clean_description(text)
+        self.assertEqual(result, 'Direction: 山田太郎\n3DCG: 佐藤次郎')
+
+    def test_url_only_line_is_dropped(self):
+        result = credit_extractor.clean_description('https://example.com\nDirection: 山田')
+        self.assertEqual(result, 'Direction: 山田')
+
+    def test_plain_credit_text_is_unchanged(self):
+        self.assertEqual(credit_extractor.clean_description('監督: 山田太郎'), '監督: 山田太郎')
+
+    def test_description_cleaned_to_empty_skips_llm(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post') as mock_post:
+                credits, raw_response, error = credit_extractor.extract_credits_debug('https://example.com\n────')
+        mock_post.assert_not_called()
+        self.assertEqual(credits, [])
+        self.assertEqual(error, '概要欄が空です')
+
+    def test_cleaned_description_is_sent_to_llm(self):
+        with patch.object(credit_extractor, 'OPENROUTER_API_KEY', 'sk-or-test'):
+            with patch('credit_extractor.requests.post', return_value=FakeResponse({'choices': [{'message': {'content': 'なし'}}]})) as mock_post:
+                credit_extractor.extract_credits_debug('Direction: 山田\nhttps://spam.example.com')
+        sent = mock_post.call_args.kwargs['json']['messages'][1]['content']
+        self.assertEqual(sent, 'Direction: 山田')
+
+
 class ExtractCreditsDebugTests(unittest.TestCase):
     def test_no_api_key_returns_error_without_network(self):
         with patch.object(credit_extractor, 'OPENROUTER_API_KEY', ''):
