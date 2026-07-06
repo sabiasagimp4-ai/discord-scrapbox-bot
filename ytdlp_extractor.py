@@ -1,9 +1,33 @@
+import hashlib
+import re
 from urllib.parse import urlparse
 
 # yt-dlp経由でメタデータを取るドメイン。YouTube/VimeoはAPI直叩きの方が速く安定するため対象外。
 # InstagramなどはデータセンターIPからだとログイン壁で失敗しうるため、あくまでベストエフォート
 # （失敗時は呼び出し側が汎用HTMLフォールバックに落ちる）。
 SUPPORTED_DOMAINS = ('instagram.com', 'tiktok.com', 'twitter.com', 'x.com')
+
+# 投稿ごとに一意なIDをURLから取り出すパターン。キャプションが取得できず
+# タイトルが「Video by ユーザー名」等の定型文になった場合でも、同一アカウントの
+# 別投稿とタイトルが衝突しないようにするために使う（重複判定はタイトル一致のため）。
+_POST_ID_PATTERNS = (
+    re.compile(r'/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)'),  # Instagram
+    re.compile(r'/video/(\d+)'),                            # TikTok
+    re.compile(r'/status(?:es)?/(\d+)'),                    # Twitter/X
+)
+
+
+def _extract_post_id(url):
+    """URLから投稿固有のIDを取り出す。既知の形式に一致しなければパス末尾のセグメント、
+    それも無ければURL全体のハッシュ（常に一意）にフォールバックする。"""
+    for pattern in _POST_ID_PATTERNS:
+        m = pattern.search(url)
+        if m:
+            return m.group(1)
+    segments = [s for s in urlparse(url).path.split('/') if s]
+    if segments:
+        return segments[-1]
+    return hashlib.md5(url.encode()).hexdigest()[:8]
 
 
 def matches(url):
@@ -44,6 +68,12 @@ def fetch(url):
         title = uploader
     if not title:
         return None
+
+    # キャプション未取得時、Instagram等は「Video by ユーザー名」のような定型タイトルを
+    # 返すことがあり、同一投稿者の別動画とタイトルが衝突して重複判定で保存漏れが起きる。
+    # 投稿URL固有のIDを付与してタイトルの一意性を保証する（同一URLの再投稿は同じIDになるため
+    # 意図した重複判定は維持される）。
+    title = f'{title} ({_extract_post_id(url)})'
 
     return {
         'title': title,
