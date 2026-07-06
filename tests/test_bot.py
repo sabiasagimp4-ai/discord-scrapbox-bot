@@ -110,6 +110,26 @@ class FetchMetadataTests(unittest.TestCase):
         self.assertEqual(result['title'], 'example.com')
         self.assertEqual(result['source'], '取得失敗')
 
+    def test_instagram_url_uses_ytdlp(self):
+        info = {'title': 'リール タイトル', 'description': 'キャプション', 'thumbnail': 'https://t.example/1.jpg', 'uploader': 'user'}
+        with patch('bot.ytdlp_extractor.fetch', return_value=info) as mock_fetch:
+            with patch('bot.requests.get') as mock_get:
+                result = bot.fetch_metadata('https://www.instagram.com/reel/ABC123/')
+        mock_fetch.assert_called_once()
+        mock_get.assert_not_called()
+        self.assertEqual(result['title'], 'リール タイトル')
+        self.assertEqual(result['description'], 'キャプション')
+        self.assertEqual(result['thumbnail'], 'https://t.example/1.jpg')
+        self.assertEqual(result['source'], 'yt-dlp')
+
+    def test_instagram_ytdlp_failure_falls_back_to_html(self):
+        html = '<html><head><title>Instagramのページ</title></head></html>'
+        with patch('bot.ytdlp_extractor.fetch', return_value=None):
+            with patch('bot.requests.get', return_value=FakeResponse(status_code=200, text=html)):
+                result = bot.fetch_metadata('https://www.instagram.com/reel/ABC123/')
+        self.assertEqual(result['title'], 'Instagramのページ')
+        self.assertIn('HTML', result['source'])
+
 
 class CheckYoutubeConnectionTests(unittest.TestCase):
     def test_no_api_key_returns_none(self):
