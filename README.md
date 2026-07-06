@@ -107,7 +107,7 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 
 ### `/debug` スラッシュコマンド
 
-指定したURLについて、Botが実際に取得するタイトル・概要欄・取得元（YouTube Data API / oEmbed / Vimeo oEmbed / HTML `<title>` のいずれを使ったか）、および取得した概要欄からOpenRouterで抽出されるクレジット情報を確認できます。Scrapboxへの保存は行いません。
+指定したURLについて、Botが実際に取得するタイトル・概要欄・取得元（YouTube Data API / oEmbed / Vimeo oEmbed / yt-dlp / HTML `<title>` のいずれを使ったか）、および取得した概要欄からOpenRouterで抽出されるクレジット情報を確認できます。Scrapboxへの保存は行いません。
 
 - YouTubeの概要欄がクレジット抽出されない場合、`YOUTUBE_API_KEY` が正しく概要欄を取得できているか（取得元が「YouTube Data API」になっているか）を確認するのに使えます。取得元が「YouTube oEmbed」になっている場合は、APIキーが未設定または無効なため概要欄が取得できていないことを示します。
 - 概要欄は取得できているのにクレジットが保存されない場合は、「クレジット抽出結果(OpenRouter)」を確認してください。`(OPENROUTER_API_KEY未設定のためスキップ)` ならキー自体が未設定であることを示します。
@@ -208,7 +208,10 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 |---|---|
 | YouTube | `YOUTUBE_API_KEY` 設定時はYouTube Data API v3（説明欄も取得可）、未設定時はoEmbed API（タイトルのみ） |
 | Vimeo | oEmbed API（タイトル・説明欄とも取得可） |
+| Instagram / TikTok / Twitter(X) | yt-dlp（タイトル・キャプション・サムネイルを取得。キャプションはクレジット抽出の対象になる）。失敗時は下の汎用HTMLにフォールバック |
 | その他 | HTMLの `<title>` タグ＋ `og:image` メタタグ（サムネイル画像として取得） |
+
+> **Instagram等の注意**: yt-dlpによる取得は**公開投稿のみ・ベストエフォート**です。InstagramはデータセンターIP（Render等）からのアクセスをログイン壁で弾くことがあり、その場合は汎用HTMLフォールバックに落ちてタイトルが簡素になります。実際に何が取れたかは `/debug url:...` で確認できます（取得元が `yt-dlp` になっていれば成功）。
 
 タイトルの改行・連続空白は1スペースに正規化されます（Scrapboxのページタイトルは複数行不可のため）。
 
@@ -304,9 +307,10 @@ discord-scrapbox-bot/
 ├── rag_qa.py                    # /ask のRAG（キーワード抽出・並列検索・回答生成）
 ├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
 ├── playlist_loader.py           # YouTube再生リストの動画URL展開
+├── ytdlp_extractor.py           # Instagram/TikTok等のメタデータ取得（yt-dlp）
 ├── tests/                       # 単体テスト（unittest）
 ├── .github/workflows/test.yml   # CI（push/PR時に単体テストを自動実行）
-├── requirements.txt             # 依存パッケージ（discord.py, requests）
+├── requirements.txt             # 依存パッケージ（discord.py, requests, yt-dlp）
 ├── Dockerfile                    # コンテナ定義
 └── fly.toml                      # 未使用（Fly.io用、Renderでは不要）
 ```

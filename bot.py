@@ -21,6 +21,7 @@ import name_linker
 import playlist_loader
 import rag_qa
 import scrapbox_search
+import ytdlp_extractor
 
 REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
 
@@ -187,6 +188,18 @@ def fetch_metadata(url):
                 }
         except Exception:
             pass
+
+    # Instagram・TikTok・Twitter(X)などは yt-dlp でメタデータ取得を試みる
+    # （データセンターIPからは失敗しうるベストエフォート。失敗時は下の汎用HTMLへフォールバック）
+    if ytdlp_extractor.matches(url):
+        info = ytdlp_extractor.fetch(url)
+        if info:
+            return {
+                'title': _normalize_title(info['title']),
+                'description': info['description'],
+                'thumbnail': info['thumbnail'],
+                'source': 'yt-dlp',
+            }
 
     # 汎用HTMLタイトル取得（og:imageもサムネイルとして取得）
     try:
