@@ -38,6 +38,9 @@ GUILD_ID = os.environ.get('GUILD_ID', '')
 # 未設定ならこの機能は完全に無効化される（タスクを起動しない）。
 DIARY_SCRAPBOX_PROJECT = os.environ.get('DIARY_SCRAPBOX_PROJECT', '')
 DIARY_SCRAPBOX_SID = os.environ.get('DIARY_SCRAPBOX_SID', '')
+# DMでの日記即追記を許可する本人のDiscordユーザーID。Botはサーバー全体から見えるため、
+# これでガードしないと他のメンバーのDMまで日記に書き込まれてしまう。
+DIARY_OWNER_USER_ID = int(os.environ.get('DIARY_OWNER_USER_ID') or '0')
 
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
@@ -62,6 +65,10 @@ ASK_REACTION_EMOJIS = {'❓', '❔'}
 _channel_project_links = None
 
 JST = timezone(timedelta(hours=9))
+
+# 日記DMの追記を1件ずつ直列化する。連続でDMを送った際に、fetch→appendの間に
+# 別のDMの書き込みが割り込んで内容が消える（同時編集による喪失）のを防ぐ。
+_diary_dm_lock = asyncio.Lock()
 
 # --- 反証可能性（observability）用の状態 ---
 # 「通知は動いている」「最新コードが動いている」をいつでも検証できるようにする。
@@ -1187,9 +1194,42 @@ async def alias_list_command(interaction: discord.Interaction):
     await interaction.followup.send(text)
 
 
+async def handle_diary_dm(message):
+    """個人のDMで送った内容を、その日の日記ページ末尾（【日記】欄）に自動追記する。
+    DIARY_SCRAPBOX_PROJECT/SID/DIARY_OWNER_USER_ID がすべて設定済みで、かつ送信者が
+    本人（DIARY_OWNER_USER_ID）の場合のみ動作する。Karureサーバーの誰でもこのBotに
+    DMを送れてしまうため、本人確認は必須（でなければ他人のDMが日記に混入する）。"""
+    if not (DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_OWNER_USER_ID):
+        return
+    if message.author.id != DIARY_OWNER_USER_ID:
+        return
+    text = message.content.strip()
+    if not text:
+        return
+
+    async with _diary_dm_lock:
+        try:
+            status, title = await asyncio.to_thread(
+                diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, text
+            )
+        except Exception as e:
+            record_error('diary_dm', e)
+            status, title = None, None
+
+    try:
+        await message.add_reaction('✅' if status == 'appended' else '❌')
+    except Exception:
+        pass
+    if status != 'appended' and title is not None:
+        record_error('diary_dm', f'{title} への追記失敗（ステータス:{status}）')
+
+
 @client.event
 async def on_message(message):
     if message.author.bot:
+        return
+    if message.guild is None:
+        await handle_diary_dm(message)
         return
     # /ask で作られたスレッド内の追い質問は会話継続として処理する
     if isinstance(message.channel, discord.Thread) and message.channel.id in _ask_threads:

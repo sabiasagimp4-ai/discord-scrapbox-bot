@@ -7,9 +7,13 @@ import diary
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, text=''):
+    def __init__(self, status_code=200, text='', json_data=None):
         self.status_code = status_code
         self.text = text
+        self._json_data = json_data or {}
+
+    def json(self):
+        return self._json_data
 
 
 NOW = datetime(2026, 7, 6, 0, 5, tzinfo=diary.JST)
@@ -86,6 +90,76 @@ class CreateDiaryPageTests(unittest.TestCase):
             with patch('diary.requests.post', side_effect=Exception('timeout')):
                 status, title = diary.create_diary_page('proj', 'sid', dt=NOW)
         self.assertIsNone(status)
+
+
+class BuildDiaryEntryLinesTests(unittest.TestCase):
+    def test_single_line_entry_puts_time_and_text_on_one_line(self):
+        self.assertEqual(diary.build_diary_entry_lines('今日は楽しかった', '21:34'), [' 21:34 今日は楽しかった'])
+
+    def test_multiline_entry_indents_continuation(self):
+        lines = diary.build_diary_entry_lines('1行目\n2行目', '21:34')
+        self.assertEqual(lines, [' 21:34 1行目', '  2行目'])
+
+    def test_trailing_whitespace_is_stripped(self):
+        self.assertEqual(diary.build_diary_entry_lines('本文   ', '21:34'), [' 21:34 本文'])
+
+
+class AppendDiaryEntryTests(unittest.TestCase):
+    def test_appends_to_existing_page_preserving_body(self):
+        existing = {'persistent': True, 'lines': [
+            {'text': '2026-07-06'},
+            {'text': '<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->'},
+            {'text': ''}, {'text': ''},
+            {'text': '【新しく知った単語】'}, {'text': ''}, {'text': '【日記】'},
+        ]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                status, title = diary.append_diary_entry('proj', 'sid', '楽しい一日だった', dt=NOW)
+        self.assertEqual(status, 'appended')
+        self.assertEqual(title, '2026-07-06')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        lines = payload['pages'][0]['lines']
+        self.assertEqual(lines[0], '2026-07-06')
+        self.assertIn('【日記】', lines)  # 既存の雛形部分が保持されている
+        self.assertEqual(lines[-1], ' 00:05 楽しい一日だった')
+
+    def test_creates_page_with_template_when_missing_then_appends(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                status, title = diary.append_diary_entry('proj', 'sid', '初めての投稿', dt=NOW)
+        self.assertEqual(status, 'appended')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        lines = payload['pages'][0]['lines']
+        self.assertEqual(lines[0], '2026-07-06')
+        self.assertIn('【日記】', lines)
+        self.assertEqual(lines[-1], ' 00:05 初めての投稿')
+
+    def test_multiline_message_is_appended_correctly(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                diary.append_diary_entry('proj', 'sid', '1行目\n2行目', dt=NOW)
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        self.assertEqual(lines[-2:], [' 00:05 1行目', '  2行目'])
+
+    def test_get_failure_returns_none_without_post(self):
+        with patch('diary.requests.get', side_effect=Exception('timeout')):
+            with patch('diary.requests.post') as mock_post:
+                status, title = diary.append_diary_entry('proj', 'sid', 'テキスト', dt=NOW)
+        mock_post.assert_not_called()
+        self.assertIsNone(status)
+
+    def test_post_failure_returns_status_code(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(500)):
+                status, title = diary.append_diary_entry('proj', 'sid', 'テキスト', dt=NOW)
+        self.assertEqual(status, 500)
+
+    def test_defaults_to_now_when_dt_omitted(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)) as mock_get:
+            with patch('diary.requests.post', return_value=FakeResponse(200)):
+                diary.append_diary_entry('proj', 'sid', 'テキスト')
+        called_url = mock_get.call_args.args[0]
+        self.assertRegex(called_url, r'\d{4}-\d{2}-\d{2}')
 
 
 if __name__ == '__main__':
