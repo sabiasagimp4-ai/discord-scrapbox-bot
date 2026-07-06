@@ -20,6 +20,34 @@ class DiaryTitleForTests(unittest.TestCase):
         self.assertEqual(diary.diary_title_for(NOW), '2026-07-06')
 
 
+class BuildTemplateTests(unittest.TestCase):
+    def test_nav_line_links_prev_today_next(self):
+        lines = diary.build_template(NOW)
+        self.assertEqual(lines[0], '<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->')
+
+    def test_headings_and_blank_lines(self):
+        lines = diary.build_template(NOW)
+        self.assertEqual(lines[1:], ['', '', '【新しく知った単語】', '', '【日記】'])
+
+    def test_month_boundary(self):
+        dt = datetime(2026, 8, 1, tzinfo=diary.JST)
+        self.assertEqual(diary.build_template(dt)[0], '<- [2026-07-31] / [2026-08-01] / [2026-08-02] ->')
+
+    def test_year_boundary(self):
+        dt = datetime(2027, 1, 1, tzinfo=diary.JST)
+        self.assertEqual(diary.build_template(dt)[0], '<- [2026-12-31] / [2027-01-01] / [2027-01-02] ->')
+
+    def test_leap_year_february_29(self):
+        # 2028年はうるう年 → 2/29が存在する
+        dt = datetime(2028, 2, 29, tzinfo=diary.JST)
+        self.assertEqual(diary.build_template(dt)[0], '<- [2028-02-28] / [2028-02-29] / [2028-03-01] ->')
+
+    def test_non_leap_year_february_28_rolls_to_march(self):
+        # 2026年は平年 → 2/28の翌日は2/29ではなく3/1
+        dt = datetime(2026, 2, 28, tzinfo=diary.JST)
+        self.assertEqual(diary.build_template(dt)[0], '<- [2026-02-27] / [2026-02-28] / [2026-03-01] ->')
+
+
 class CreateDiaryPageTests(unittest.TestCase):
     def test_creates_page_with_template_when_missing(self):
         with patch('diary.name_linker.check_page_exists', return_value=False):
@@ -30,8 +58,9 @@ class CreateDiaryPageTests(unittest.TestCase):
         payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
         lines = payload['pages'][0]['lines']
         self.assertEqual(lines[0], '2026-07-06')
-        self.assertIn('[* 今日のできごと]', lines)
-        self.assertIn('#日記', lines)
+        self.assertIn('<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->', lines)
+        self.assertIn('【新しく知った単語】', lines)
+        self.assertIn('【日記】', lines)
 
     def test_skips_when_page_already_exists(self):
         with patch('diary.name_linker.check_page_exists', return_value=True):
