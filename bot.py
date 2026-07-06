@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import audit_log
 import channel_links
 import credit_extractor
+import diary
 import gyazo_uploader
 import name_linker
 import playlist_loader
@@ -33,6 +34,10 @@ SCRAPBOX_SID = os.environ.get('SCRAPBOX_SID', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 CREDIT_MAPPING_PAGE = os.environ.get('CREDIT_MAPPING_PAGE', '')
 GUILD_ID = os.environ.get('GUILD_ID', '')
+# 個人の日記ページ自動作成用。Karureの共有プロジェクトとは別のScrapboxプロジェクトを想定。
+# 未設定ならこの機能は完全に無効化される（タスクを起動しない）。
+DIARY_SCRAPBOX_PROJECT = os.environ.get('DIARY_SCRAPBOX_PROJECT', '')
+DIARY_SCRAPBOX_SID = os.environ.get('DIARY_SCRAPBOX_SID', '')
 
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
@@ -576,6 +581,22 @@ async def daily_health_check():
         _mark_task_run('日次ヘルスチェック', False, e)
 
 
+@tasks.loop(time=dt_time(hour=0, minute=5, tzinfo=JST))
+async def create_daily_diary_page_task():
+    """個人の日記ページ（Karureの共有プロジェクトとは別のScrapboxプロジェクト）を
+    日付タイトル・雛形付きで自動作成する。Discordへの通知は行わない（裏で完結する）。"""
+    try:
+        status, title = await asyncio.to_thread(diary.create_diary_page, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
+        if status in ('created', 'exists'):
+            _mark_task_run('日記ページ作成', True, f'{status}: {title}')
+        else:
+            record_error('diary', f'{title} の作成に失敗（ステータス:{status}）')
+            _mark_task_run('日記ページ作成', False, f'ステータス:{status}')
+    except Exception as e:
+        record_error('diary', e)
+        _mark_task_run('日記ページ作成', False, e)
+
+
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
@@ -591,6 +612,8 @@ async def on_ready():
         daily_health_check.start()
     if not notify_new_pages.is_running():
         notify_new_pages.start()
+    if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and not create_daily_diary_page_task.is_running():
+        create_daily_diary_page_task.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
