@@ -7,21 +7,27 @@ import name_linker
 
 JST = timezone(timedelta(hours=9))
 
-# 日記ページの雛形（タイトル行は除く）。内容を変えたい場合はここを編集する。
-DIARY_TEMPLATE = [
-    '[* 今日のできごと]',
-    '',
-    '[* 学び・気づき]',
-    '',
-    '[* 感想]',
-    '',
-    '#日記',
-]
-
-
 def diary_title_for(dt):
     """日記ページのタイトル（YYYY-MM-DD形式）を返す"""
     return dt.strftime('%Y-%m-%d')
+
+
+def build_template(dt):
+    """日記ページの雛形（タイトル行は除く）を組み立てる。
+    前日・翌日ページへのナビゲーションリンクを先頭に含む。月末・年末・うるう年の
+    境界は timedelta による日付演算に任せることで自前の分岐なしに正しく処理する。
+    内容を変えたい場合はここを編集する。"""
+    prev_day = diary_title_for(dt - timedelta(days=1))
+    today = diary_title_for(dt)
+    next_day = diary_title_for(dt + timedelta(days=1))
+    return [
+        f'<- [{prev_day}] / [{today}] / [{next_day}] ->',
+        '',
+        '',
+        '【新しく知った単語】',
+        '',
+        '【日記】',
+    ]
 
 
 def create_diary_page(project, sid, dt=None):
@@ -36,7 +42,7 @@ def create_diary_page(project, sid, dt=None):
     if name_linker.check_page_exists(project, sid, title):
         return 'exists', title
 
-    lines = [title] + DIARY_TEMPLATE
+    lines = [title] + build_template(dt)
     payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
     try:
         r = requests.post(
