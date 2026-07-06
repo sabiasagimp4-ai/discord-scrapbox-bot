@@ -200,6 +200,28 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 
 5分ごとにScrapboxプロジェクト内の全ページ一覧をポーリングし、前回確認時から新たに増えたページを検知して指定チャンネルに通知します。Scrapboxアプリから直接作成したページなど、このBot経由ではない投稿にも反応します。`/save` コマンドやメッセージ監視でBot自身が保存したページは、保存時のリプライと二重に通知されないよう自動的に除外されます。Bot起動直後の1回目は「今存在するページ」を基準として記録するだけで、既存ページ全件を通知することはありません。
 
+### 個人の日記ページ自動作成（任意）
+
+`DIARY_SCRAPBOX_PROJECT` と `DIARY_SCRAPBOX_SID` を設定すると、毎日0:05（日本時間）に、その日の日付（`2026-07-06` 形式）をタイトルとしたページを雛形付きで自動作成します。
+
+```
+2026-07-06
+[* 今日のできごと]
+
+[* 学び・気づき]
+
+[* 感想]
+
+#日記
+```
+
+- **Karureの共有プロジェクト（`SCRAPBOX_PROJECT`）とは別のプロジェクトを想定**しています。個人の日記を同じBotで、かつチームのWikiとは別のScrapboxプロジェクトに自動作成できます
+- Discordへの通知は行わず、裏側でScrapboxへの書き込みだけが完結します
+- 同名ページが既に存在する場合は上書きせずスキップします（同日中に何らかの理由で再実行されても壊れません）
+- どちらか一方でも未設定の場合はこの機能自体が起動しません（既存の全機能に影響なし）
+- 雛形の内容は `diary.py` の `DIARY_TEMPLATE` を編集すれば変更できます
+- 実行結果（成功/失敗）は `/status` の稼働情報にも表示されます。Karureメンバーにも「日記ページ作成」というタスク名は見えますが、内容は一切表示されません
+
 ---
 
 ## タイトル取得ロジック
@@ -282,6 +304,8 @@ Render → Environment から設定します。
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
 | `GUILD_ID` | — | 設定するとそのサーバーIDに`/save`コマンドを即時反映する（未設定時はグローバル反映で最大1時間程度かかる） | `1234567890123456789` |
 | `GYAZO_ACCESS_TOKEN` | — | サムネイル画像をGyazoにアップロードし直すためのアクセストークン。未設定時は取得した画像URLを直接埋め込む | `xxxxxxxx-xxxx-...` |
+| `DIARY_SCRAPBOX_PROJECT` | — | 個人の日記ページを自動作成する先のScrapboxプロジェクト名（`SCRAPBOX_PROJECT` とは別のプロジェクトを想定）。未設定時はこの機能を無効化 | `my-diary` |
+| `DIARY_SCRAPBOX_SID` | — | 上記プロジェクトの `connect.sid` Cookie値 | `s%3Ayyyyyy...` |
 
 ### connect.sid の取得方法
 
@@ -310,6 +334,7 @@ discord-scrapbox-bot/
 ├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
 ├── playlist_loader.py           # YouTube再生リストの動画URL展開
 ├── ytdlp_extractor.py           # Instagram/TikTok等のメタデータ取得（yt-dlp）
+├── diary.py                     # 個人の日記ページ自動作成（任意機能）
 ├── tests/                       # 単体テスト（unittest）
 ├── .github/workflows/test.yml   # CI（push/PR時に単体テストを自動実行）
 ├── requirements.txt             # 依存パッケージ（discord.py, requests, yt-dlp）
@@ -350,7 +375,7 @@ python bot.py
 
 ## テスト
 
-`bot.py`・`name_linker.py`・`credit_extractor.py`・`scrapbox_search.py`・`rag_qa.py`・`gyazo_uploader.py`・`playlist_loader.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。`bot.py` は `discord.py` をインポートするため、テスト実行には `pip install -r requirements.txt` が必要です。
+`bot.py`・`name_linker.py`・`credit_extractor.py`・`scrapbox_search.py`・`rag_qa.py`・`gyazo_uploader.py`・`playlist_loader.py`・`ytdlp_extractor.py`・`diary.py` には外部APIをモックした単体テストがあります（標準ライブラリの `unittest` のみ使用、追加の依存パッケージ不要）。`bot.py` は `discord.py` をインポートするため、テスト実行には `pip install -r requirements.txt` が必要です。
 
 ```bash
 python -m unittest discover -s tests -v
