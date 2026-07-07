@@ -616,6 +616,60 @@ class AuditWiringTests(unittest.TestCase):
         self.assertEqual(self.audit_mock.call_args.args[0], 'project-create')
 
 
+class DiaryWebhookRequestTests(unittest.TestCase):
+    def setUp(self):
+        patches = [
+            patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
+            patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
+            patch.object(bot, 'DIARY_WEBHOOK_TOKEN', 'secret-token'),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_disabled_when_not_configured(self):
+        with patch.object(bot, 'DIARY_WEBHOOK_TOKEN', ''):
+            status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "hi"}')
+        self.assertEqual(status, 503)
+        self.assertIn('error', payload)
+
+    def test_wrong_token_is_rejected(self):
+        status, payload = bot.handle_diary_webhook_request('wrong-token', b'{"text": "hi"}')
+        self.assertEqual(status, 401)
+
+    def test_missing_token_is_rejected(self):
+        status, payload = bot.handle_diary_webhook_request('', b'{"text": "hi"}')
+        self.assertEqual(status, 401)
+
+    def test_invalid_json_returns_400(self):
+        status, payload = bot.handle_diary_webhook_request('secret-token', b'not json')
+        self.assertEqual(status, 400)
+
+    def test_empty_text_returns_400(self):
+        status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "  "}')
+        self.assertEqual(status, 400)
+
+    def test_valid_request_appends_diary_entry(self):
+        with patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')) as mock_append:
+            status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "\xe4\xbb\x8a\xe6\x97\xa5"}')
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {'status': 'appended', 'title': '2026-07-07', 'section': 'diary'})
+        mock_append.assert_called_once_with('diary-proj', 'sid', '今日', 'diary')
+
+    def test_vocab_prefix_routes_to_vocab_section(self):
+        body = json.dumps({'text': '単語:serendipity'}).encode('utf-8')
+        with patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')) as mock_append:
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(payload['section'], 'vocab')
+        mock_append.assert_called_once_with('diary-proj', 'sid', 'serendipity', 'vocab')
+
+    def test_append_failure_returns_502(self):
+        with patch.object(bot.diary, 'append_diary_entry', return_value=(500, '2026-07-07')):
+            status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "hi"}')
+        self.assertEqual(status, 502)
+        self.assertIn('error', payload)
+
+
 class ReactionActionTests(unittest.TestCase):
     def test_save_emojis_map_to_save(self):
         for emoji in bot.SAVE_REACTION_EMOJIS:
