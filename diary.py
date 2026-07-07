@@ -7,6 +7,14 @@ import name_linker
 
 JST = timezone(timedelta(hours=9))
 
+VOCAB_HEADING = '【新しく知った単語】'
+DIARY_HEADING = '【日記】'
+
+# DM本文がこの接頭辞（半角/全角コロンどちらでも可）で始まる場合、
+# 【日記】ではなく VOCAB_HEADING（見出しの直前）に挿入する。
+VOCAB_TRIGGER_PREFIXES = ('単語:', '単語：')
+
+
 def diary_title_for(dt):
     """日記ページのタイトル（YYYY-MM-DD形式）を返す"""
     return dt.strftime('%Y-%m-%d')
@@ -24,9 +32,9 @@ def build_template(dt):
         f'<- [{prev_day}] / [{today}] / [{next_day}] ->',
         '',
         '',
-        '【新しく知った単語】',
+        VOCAB_HEADING,
         '',
-        '【日記】',
+        DIARY_HEADING,
     ]
 
 
@@ -62,19 +70,41 @@ def create_diary_page(project, sid, dt=None):
     return r.status_code, title
 
 
-def build_diary_entry_lines(text, time_str):
-    """DM本文を日記エントリの行に変換する。1行目には時刻を先頭に付け、
-    複数行メッセージの2行目以降はインデントする。"""
+def build_entry_lines(text):
+    """本文を追記用の行リストに変換する。1行目は見出し直下の通常インデント、
+    複数行メッセージの2行目以降はさらにインデントする。"""
     body_lines = text.splitlines() or ['']
     first, *rest = body_lines
-    lines = [f' {time_str} {first}'.rstrip()]
+    lines = [f' {first}'.rstrip()]
     for line in rest:
         lines.append(f'  {line.rstrip()}')
     return lines
 
 
-def append_diary_entry(project, sid, text, dt=None):
-    """指定日（省略時は現在時刻・JST）の日記ページ末尾にDM本文を追記する。
+def classify_entry(text):
+    """DM本文の宛先セクションを判定する。戻り値: ('vocab' | 'diary', 本文)
+    先頭が「単語:」（全角コロンも可）で始まる場合は VOCAB_HEADING 欄、
+    それ以外は DIARY_HEADING 欄とする。"""
+    for prefix in VOCAB_TRIGGER_PREFIXES:
+        if text.startswith(prefix):
+            return 'vocab', text[len(prefix):].strip()
+    return 'diary', text
+
+
+def _insert_before_heading(body_lines, heading, new_lines):
+    """body_lines内でheading行が最初に現れる位置の直前にnew_linesを挿入する。
+    heading が見つからない場合（手動編集で見出しが消えた等）は末尾に追加する。"""
+    for i, line in enumerate(body_lines):
+        if line.strip() == heading:
+            body_lines[i:i] = new_lines
+            return
+    body_lines.extend(new_lines)
+
+
+def append_diary_entry(project, sid, text, section='diary', dt=None):
+    """指定日（省略時は現在時刻・JST）の日記ページに本文を追記する。
+    section='diary'（既定）は DIARY_HEADING 欄の末尾（ページ末尾）に追記し、
+    section='vocab' は VOCAB_HEADING 欄の末尾（DIARY_HEADING 見出しの直前）に挿入する。
     ページが無ければ雛形付きで新規作成してから追記する（ページ名は日付から
     決定的に導かれるため、/note と違いタイポによる誤作成のリスクが無い）。
     戻り値: (status, title)
@@ -104,7 +134,15 @@ def append_diary_entry(project, sid, text, dt=None):
     if not body_lines:
         body_lines = build_template(dt)
 
-    body_lines.extend(build_diary_entry_lines(text, dt.strftime('%H:%M')))
+    entry_lines = build_entry_lines(text)
+    if section == 'vocab':
+        _insert_before_heading(body_lines, DIARY_HEADING, entry_lines)
+    else:
+        # Scrapbox取得結果の末尾に空行が残っていることがあり、そのまま追記すると
+        # 追記のたびに空行が増えていくため、末尾の空行を詰めてから追記する
+        while body_lines and not body_lines[-1].strip():
+            body_lines.pop()
+        body_lines.extend(entry_lines)
 
     payload = json.dumps({'pages': [{'title': title, 'lines': [title] + body_lines}]})
     try:
