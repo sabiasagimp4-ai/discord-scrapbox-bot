@@ -1195,7 +1195,8 @@ async def alias_list_command(interaction: discord.Interaction):
 
 
 async def handle_diary_dm(message):
-    """個人のDMで送った内容を、その日の日記ページ末尾（【日記】欄）に自動追記する。
+    """個人のDMで送った内容を、その日の日記ページに自動追記する。先頭が「単語:」の
+    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。
     DIARY_SCRAPBOX_PROJECT/SID/DIARY_OWNER_USER_ID がすべて設定済みで、かつ送信者が
     本人（DIARY_OWNER_USER_ID）の場合のみ動作する。Karureサーバーの誰でもこのBotに
     DMを送れてしまうため、本人確認は必須（でなければ他人のDMが日記に混入する）。"""
@@ -1206,11 +1207,12 @@ async def handle_diary_dm(message):
     text = message.content.strip()
     if not text:
         return
+    section, body = diary.classify_entry(text)
 
     async with _diary_dm_lock:
         try:
             status, title = await asyncio.to_thread(
-                diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, text
+                diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
             )
         except Exception as e:
             record_error('diary_dm', e)

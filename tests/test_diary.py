@@ -92,16 +92,30 @@ class CreateDiaryPageTests(unittest.TestCase):
         self.assertIsNone(status)
 
 
-class BuildDiaryEntryLinesTests(unittest.TestCase):
-    def test_single_line_entry_puts_time_and_text_on_one_line(self):
-        self.assertEqual(diary.build_diary_entry_lines('今日は楽しかった', '21:34'), [' 21:34 今日は楽しかった'])
+class BuildEntryLinesTests(unittest.TestCase):
+    def test_single_line_entry(self):
+        self.assertEqual(diary.build_entry_lines('今日は楽しかった'), [' 今日は楽しかった'])
 
     def test_multiline_entry_indents_continuation(self):
-        lines = diary.build_diary_entry_lines('1行目\n2行目', '21:34')
-        self.assertEqual(lines, [' 21:34 1行目', '  2行目'])
+        lines = diary.build_entry_lines('1行目\n2行目')
+        self.assertEqual(lines, [' 1行目', '  2行目'])
 
     def test_trailing_whitespace_is_stripped(self):
-        self.assertEqual(diary.build_diary_entry_lines('本文   ', '21:34'), [' 21:34 本文'])
+        self.assertEqual(diary.build_entry_lines('本文   '), [' 本文'])
+
+
+class ClassifyEntryTests(unittest.TestCase):
+    def test_vocab_prefix_half_width_colon(self):
+        self.assertEqual(diary.classify_entry('単語:serendipity'), ('vocab', 'serendipity'))
+
+    def test_vocab_prefix_full_width_colon(self):
+        self.assertEqual(diary.classify_entry('単語：serendipity'), ('vocab', 'serendipity'))
+
+    def test_no_prefix_is_diary(self):
+        self.assertEqual(diary.classify_entry('今日は楽しかった'), ('diary', '今日は楽しかった'))
+
+    def test_prefix_with_extra_spaces_is_trimmed(self):
+        self.assertEqual(diary.classify_entry('単語:  serendipity  '), ('vocab', 'serendipity'))
 
 
 class AppendDiaryEntryTests(unittest.TestCase):
@@ -121,7 +135,18 @@ class AppendDiaryEntryTests(unittest.TestCase):
         lines = payload['pages'][0]['lines']
         self.assertEqual(lines[0], '2026-07-06')
         self.assertIn('【日記】', lines)  # 既存の雛形部分が保持されている
-        self.assertEqual(lines[-1], ' 00:05 楽しい一日だった')
+        self.assertEqual(lines[-1], ' 楽しい一日だった')
+
+    def test_trailing_blank_lines_from_fetch_are_trimmed_before_append(self):
+        # Scrapbox取得結果の末尾に空行が残っていても、追記のたびに空行が増えない
+        existing = {'persistent': True, 'lines': [
+            {'text': '2026-07-06'}, {'text': '【日記】'}, {'text': ' 既存エントリ'}, {'text': ''}, {'text': ''},
+        ]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                diary.append_diary_entry('proj', 'sid', '新しいエントリ', dt=NOW)
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        self.assertEqual(lines[-2:], [' 既存エントリ', ' 新しいエントリ'])
 
     def test_creates_page_with_template_when_missing_then_appends(self):
         with patch('diary.requests.get', return_value=FakeResponse(404)):
@@ -132,14 +157,37 @@ class AppendDiaryEntryTests(unittest.TestCase):
         lines = payload['pages'][0]['lines']
         self.assertEqual(lines[0], '2026-07-06')
         self.assertIn('【日記】', lines)
-        self.assertEqual(lines[-1], ' 00:05 初めての投稿')
+        self.assertEqual(lines[-1], ' 初めての投稿')
 
     def test_multiline_message_is_appended_correctly(self):
         with patch('diary.requests.get', return_value=FakeResponse(404)):
             with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
                 diary.append_diary_entry('proj', 'sid', '1行目\n2行目', dt=NOW)
         lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
-        self.assertEqual(lines[-2:], [' 00:05 1行目', '  2行目'])
+        self.assertEqual(lines[-2:], [' 1行目', '  2行目'])
+
+    def test_vocab_section_inserts_before_diary_heading(self):
+        existing = {'persistent': True, 'lines': [
+            {'text': '2026-07-06'},
+            {'text': '【新しく知った単語】'}, {'text': ' 既存単語'},
+            {'text': '【日記】'}, {'text': ' 既存日記'},
+        ]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                status, title = diary.append_diary_entry('proj', 'sid', 'serendipity', section='vocab', dt=NOW)
+        self.assertEqual(status, 'appended')
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        self.assertEqual(lines, [
+            '2026-07-06', '【新しく知った単語】', ' 既存単語', ' serendipity', '【日記】', ' 既存日記',
+        ])
+
+    def test_vocab_section_falls_back_to_append_when_heading_missing(self):
+        existing = {'persistent': True, 'lines': [{'text': '2026-07-06'}, {'text': '本文のみ'}]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                diary.append_diary_entry('proj', 'sid', 'serendipity', section='vocab', dt=NOW)
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        self.assertEqual(lines[-1], ' serendipity')
 
     def test_get_failure_returns_none_without_post(self):
         with patch('diary.requests.get', side_effect=Exception('timeout')):
