@@ -177,8 +177,9 @@ class AppendDiaryEntryTests(unittest.TestCase):
                 status, title = diary.append_diary_entry('proj', 'sid', 'serendipity', section='vocab', dt=NOW)
         self.assertEqual(status, 'appended')
         lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        # 単語はScrapboxのリンク記法 [ ] で囲まれ、クリックで単語ごとのページを開ける
         self.assertEqual(lines, [
-            '2026-07-06', '【新しく知った単語】', ' 既存単語', ' serendipity', '【日記】', ' 既存日記',
+            '2026-07-06', '【新しく知った単語】', ' 既存単語', ' [serendipity]', '【日記】', ' 既存日記',
         ])
 
     def test_vocab_section_falls_back_to_append_when_heading_missing(self):
@@ -187,7 +188,15 @@ class AppendDiaryEntryTests(unittest.TestCase):
             with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
                 diary.append_diary_entry('proj', 'sid', 'serendipity', section='vocab', dt=NOW)
         lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
-        self.assertEqual(lines[-1], ' serendipity')
+        self.assertEqual(lines[-1], ' [serendipity]')
+
+    def test_diary_section_is_not_wrapped_in_brackets(self):
+        # 【日記】欄はこれまで通りプレーンテキストのまま（単語欄のみ[]で囲む）
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                diary.append_diary_entry('proj', 'sid', '今日は楽しかった', section='diary', dt=NOW)
+        lines = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])['pages'][0]['lines']
+        self.assertEqual(lines[-1], ' 今日は楽しかった')
 
     def test_get_failure_returns_none_without_post(self):
         with patch('diary.requests.get', side_effect=Exception('timeout')):

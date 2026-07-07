@@ -134,10 +134,12 @@ def append_diary_entry(project, sid, text, section='diary', dt=None):
     if not body_lines:
         body_lines = build_template(dt)
 
-    entry_lines = build_entry_lines(text)
     if section == 'vocab':
+        # 単語はScrapboxのリンク記法で囲み、クリックで単語ごとのページを開けるようにする
+        entry_lines = build_entry_lines(f'[{text}]')
         _insert_before_heading(body_lines, DIARY_HEADING, entry_lines)
     else:
+        entry_lines = build_entry_lines(text)
         # Scrapbox取得結果の末尾に空行が残っていることがあり、そのまま追記すると
         # 追記のたびに空行が増えていくため、末尾の空行を詰めてから追記する
         while body_lines and not body_lines[-1].strip():
