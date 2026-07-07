@@ -1,5 +1,6 @@
 import asyncio
 import discord
+import hmac
 import json
 import random
 import re
@@ -10,7 +11,7 @@ import requests
 from collections import deque
 from datetime import datetime, time as dt_time, timezone, timedelta
 from discord.ext import tasks
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import audit_log
@@ -41,6 +42,9 @@ DIARY_SCRAPBOX_SID = os.environ.get('DIARY_SCRAPBOX_SID', '')
 # DMでの日記即追記を許可する本人のDiscordユーザーID。Botはサーバー全体から見えるため、
 # これでガードしないと他のメンバーのDMまで日記に書き込まれてしまう。
 DIARY_OWNER_USER_ID = int(os.environ.get('DIARY_OWNER_USER_ID') or '0')
+# iOSショートカット等からのWebhook経由の日記追記用トークン。ヘルスチェックサーバーは
+# インターネットに公開されているため、これが無ければ機能自体を無効化する。
+DIARY_WEBHOOK_TOKEN = os.environ.get('DIARY_WEBHOOK_TOKEN', '')
 
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
@@ -1319,6 +1323,32 @@ async def handle_reaction_ask(message, reactor_id):
     await _start_ask_thread(sent, cleaned, answer)
 
 
+def handle_diary_webhook_request(token, raw_body):
+    """iOSショートカット等からのWebhook POSTを処理する（Discordを介さない日記追記経路）。
+    DMでの追記（handle_diary_dm）と同じ diary.classify_entry / append_diary_entry を
+    再利用するため、「単語:」プレフィックスの挙動も共通。
+    戻り値: (http_status, response_dict)
+    """
+    if not (DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_WEBHOOK_TOKEN):
+        return 503, {'error': '日記Webhookは未設定です'}
+    if not hmac.compare_digest(token or '', DIARY_WEBHOOK_TOKEN):
+        return 401, {'error': 'トークンが不正です'}
+    try:
+        data = json.loads(raw_body or b'{}')
+    except Exception:
+        return 400, {'error': 'JSONの形式が不正です'}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return 400, {'error': 'text が空です'}
+
+    section, body = diary.classify_entry(text)
+    status, title = diary.append_diary_entry(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section)
+    if status == 'appended':
+        return 200, {'status': 'appended', 'title': title, 'section': section}
+    record_error('diary_webhook', f'{title} への追記失敗（ステータス:{status}）')
+    return 502, {'error': f'Scrapboxへの書き込みに失敗しました（ステータス:{status}）'}
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -1329,13 +1359,31 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def do_POST(self):
+        if self.path != '/diary':
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get('Content-Length') or 0)
+        raw_body = self.rfile.read(length) if length else b''
+        token = self.headers.get('X-Diary-Token', '')
+        status, payload = handle_diary_webhook_request(token, raw_body)
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *args):
         pass
 
 
 def run_health_server():
     port = int(os.environ.get('PORT', 8080))
-    HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
+    # ThreadingHTTPServer: 日記Webhookの書き込み（Scrapboxへの数秒かかりうる通信）が、
+    # UptimeRobot等からのヘルスチェックGETをブロックしないようにするため
+    ThreadingHTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 
 def main():

@@ -247,6 +247,34 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 1. Discordの設定 → 詳細設定 → **開発者モード** をON
 2. 自分のユーザー名を右クリック（またはプロフィールの「…」メニュー）→ **IDをコピー**
 
+#### iOSショートカットからの即追記（Discordを介さない）
+
+`DIARY_WEBHOOK_TOKEN` を設定すると、**Discordを開かずiOSショートカットから直接**日記に追記できる Webhook が有効になります。DMと同じロジック（`単語:` プレフィックスでの単語欄振り分けを含む）を使うので、挙動は完全に共通です。
+
+**エンドポイント**: `POST https://{Renderのサービスドメイン}/diary`
+
+| 項目 | 内容 |
+|---|---|
+| ヘッダー | `X-Diary-Token: {DIARY_WEBHOOK_TOKENの値}` |
+| ヘッダー | `Content-Type: application/json` |
+| ボディ（JSON） | `{"text": "追記したい本文"}` |
+
+成功時は `{"status": "appended", "title": "2026-07-07", "section": "diary"}` のようなJSONが200で返ります。`単語:` で始めれば `"section": "vocab"` として単語欄に入ります。
+
+**iOSショートカットの作り方（例）**:
+1. ショートカットアプリで新規ショートカットを作成
+2. 「入力を要求」または「共有シートから受け取る」アクションを追加（他のアプリから共有／Siriで話しかけて使えるようにする場合）
+3. 「URLの内容を取得」アクションを追加:
+   - URL: `https://{Renderのサービスドメイン}/diary`
+   - メソッド: **POST**
+   - ヘッダー: `X-Diary-Token` に自分のトークン、`Content-Type` に `application/json`
+   - 本文: JSON形式で `text` キーに入力内容を設定
+
+**`DIARY_WEBHOOK_TOKEN` の決め方**: パスワード生成ツール等で作った十分長いランダム文字列を使ってください（このトークンを知っていれば誰でも日記に書き込めるため、推測されにくい値にすることが重要です）。RenderとiOSショートカットの両方に同じ値を設定します。
+
+- `DIARY_SCRAPBOX_PROJECT` / `DIARY_SCRAPBOX_SID` / `DIARY_WEBHOOK_TOKEN` の3つが揃って初めて有効になります（DM機能とは独立して有効・無効を切り替えられます）
+- ヘルスチェック用のHTTPサーバーは `ThreadingHTTPServer` を使っており、Webhookの処理中もUptimeRobot等のヘルスチェックがブロックされません
+
 ---
 
 ## タイトル取得ロジック
@@ -332,6 +360,7 @@ Render → Environment から設定します。
 | `DIARY_SCRAPBOX_PROJECT` | — | 個人の日記ページを自動作成する先のScrapboxプロジェクト名（`SCRAPBOX_PROJECT` とは別のプロジェクトを想定）。未設定時はこの機能を無効化 | `my-diary` |
 | `DIARY_SCRAPBOX_SID` | — | 上記プロジェクトの `connect.sid` Cookie値 | `s%3Ayyyyyy...` |
 | `DIARY_OWNER_USER_ID` | — | DMでの日記即追記を許可する本人のDiscordユーザーID。未設定時はDM追記機能を無効化 | `123456789012345678` |
+| `DIARY_WEBHOOK_TOKEN` | — | iOSショートカット等からの日記追記Webhookの認証トークン。十分に長いランダム文字列にすること。未設定時はWebhook機能を無効化 | `a9f3...`（自分で生成したランダム文字列） |
 
 ### connect.sid の取得方法
 
