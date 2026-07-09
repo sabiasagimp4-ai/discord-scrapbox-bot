@@ -22,13 +22,16 @@ def diary_title_for(dt):
 
 def build_template(dt):
     """日記ページの雛形（タイトル行は除く）を組み立てる。
-    前日・翌日ページへのナビゲーションリンクを先頭に含む。月末・年末・うるう年の
+    タイトル（日付）の直下に #日記 タグを付け、「日記」ページの逆リンクが
+    全日記ページの一覧として機能するようにする（Karureの #Karure制作 と同じ仕組み）。
+    続けて前日・翌日ページへのナビゲーションリンクを含む。月末・年末・うるう年の
     境界は timedelta による日付演算に任せることで自前の分岐なしに正しく処理する。
     内容を変えたい場合はここを編集する。"""
     prev_day = diary_title_for(dt - timedelta(days=1))
     today = diary_title_for(dt)
     next_day = diary_title_for(dt + timedelta(days=1))
     return [
+        '#日記',
         f'<- [{prev_day}] / [{today}] / [{next_day}] ->',
         '',
         '',
