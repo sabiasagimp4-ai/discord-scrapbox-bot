@@ -25,31 +25,37 @@ class DiaryTitleForTests(unittest.TestCase):
 
 
 class BuildTemplateTests(unittest.TestCase):
+    def test_tag_line_is_first(self):
+        # タイトル（日付）の直下に #日記 タグを置く。「日記」ページの逆リンクが
+        # 全日記ページの一覧として機能する（Karureの #Karure制作 と同じ仕組み）
+        lines = diary.build_template(NOW)
+        self.assertEqual(lines[0], '#日記')
+
     def test_nav_line_links_prev_today_next(self):
         lines = diary.build_template(NOW)
-        self.assertEqual(lines[0], '<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->')
+        self.assertEqual(lines[1], '<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->')
 
     def test_headings_and_blank_lines(self):
         lines = diary.build_template(NOW)
-        self.assertEqual(lines[1:], ['', '', '【新しく知った単語】', '', '【日記】'])
+        self.assertEqual(lines[2:], ['', '', '【新しく知った単語】', '', '【日記】'])
 
     def test_month_boundary(self):
         dt = datetime(2026, 8, 1, tzinfo=diary.JST)
-        self.assertEqual(diary.build_template(dt)[0], '<- [2026-07-31] / [2026-08-01] / [2026-08-02] ->')
+        self.assertEqual(diary.build_template(dt)[1], '<- [2026-07-31] / [2026-08-01] / [2026-08-02] ->')
 
     def test_year_boundary(self):
         dt = datetime(2027, 1, 1, tzinfo=diary.JST)
-        self.assertEqual(diary.build_template(dt)[0], '<- [2026-12-31] / [2027-01-01] / [2027-01-02] ->')
+        self.assertEqual(diary.build_template(dt)[1], '<- [2026-12-31] / [2027-01-01] / [2027-01-02] ->')
 
     def test_leap_year_february_29(self):
         # 2028年はうるう年 → 2/29が存在する
         dt = datetime(2028, 2, 29, tzinfo=diary.JST)
-        self.assertEqual(diary.build_template(dt)[0], '<- [2028-02-28] / [2028-02-29] / [2028-03-01] ->')
+        self.assertEqual(diary.build_template(dt)[1], '<- [2028-02-28] / [2028-02-29] / [2028-03-01] ->')
 
     def test_non_leap_year_february_28_rolls_to_march(self):
         # 2026年は平年 → 2/28の翌日は2/29ではなく3/1
         dt = datetime(2026, 2, 28, tzinfo=diary.JST)
-        self.assertEqual(diary.build_template(dt)[0], '<- [2026-02-27] / [2026-02-28] / [2026-03-01] ->')
+        self.assertEqual(diary.build_template(dt)[1], '<- [2026-02-27] / [2026-02-28] / [2026-03-01] ->')
 
 
 class CreateDiaryPageTests(unittest.TestCase):
@@ -62,6 +68,7 @@ class CreateDiaryPageTests(unittest.TestCase):
         payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
         lines = payload['pages'][0]['lines']
         self.assertEqual(lines[0], '2026-07-06')
+        self.assertEqual(lines[1], '#日記')
         self.assertIn('<- [2026-07-05] / [2026-07-06] / [2026-07-07] ->', lines)
         self.assertIn('【新しく知った単語】', lines)
         self.assertIn('【日記】', lines)
