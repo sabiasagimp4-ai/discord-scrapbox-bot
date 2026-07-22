@@ -564,7 +564,6 @@ def run_daily_health_checks():
         ('Scrapbox', name_linker.check_connection, (SCRAPBOX_PROJECT, SCRAPBOX_SID)),
         ('YouTube Data API', check_youtube_connection, ()),
         ('OpenRouter(AI)', credit_extractor.check_connection, ()),
-        ('Gyazo', gyazo_uploader.check_connection, ()),
     ]
     problems = []
     for label, func, args in checks:
