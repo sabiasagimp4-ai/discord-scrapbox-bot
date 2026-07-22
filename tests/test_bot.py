@@ -333,9 +333,7 @@ class RunDailyHealthChecksTests(unittest.TestCase):
             with patch.object(bot, 'check_youtube_connection', return_value=(None, '未設定')):
                 with patch.object(bot, 'credit_extractor') as mock_credit_extractor:
                     mock_credit_extractor.check_connection.return_value = (True, '接続OK')
-                    with patch.object(bot, 'gyazo_uploader') as mock_gyazo:
-                        mock_gyazo.check_connection.return_value = (None, '未設定')
-                        problems = bot.run_daily_health_checks()
+                    problems = bot.run_daily_health_checks()
         self.assertEqual(problems, [])
 
     def test_failing_check_is_reported(self):
@@ -344,9 +342,7 @@ class RunDailyHealthChecksTests(unittest.TestCase):
             with patch.object(bot, 'check_youtube_connection', return_value=(None, '未設定')):
                 with patch.object(bot, 'credit_extractor') as mock_credit_extractor:
                     mock_credit_extractor.check_connection.return_value = (None, '未設定')
-                    with patch.object(bot, 'gyazo_uploader') as mock_gyazo:
-                        mock_gyazo.check_connection.return_value = (None, '未設定')
-                        problems = bot.run_daily_health_checks()
+                    problems = bot.run_daily_health_checks()
         self.assertEqual(len(problems), 1)
         self.assertIn('Scrapbox', problems[0])
         self.assertIn('Cookie期限切れ', problems[0])
@@ -357,11 +353,22 @@ class RunDailyHealthChecksTests(unittest.TestCase):
             with patch.object(bot, 'check_youtube_connection', return_value=(None, '未設定')):
                 with patch.object(bot, 'credit_extractor') as mock_credit_extractor:
                     mock_credit_extractor.check_connection.return_value = (None, '未設定')
-                    with patch.object(bot, 'gyazo_uploader') as mock_gyazo:
-                        mock_gyazo.check_connection.return_value = (None, '未設定')
-                        problems = bot.run_daily_health_checks()
+                    problems = bot.run_daily_health_checks()
         self.assertEqual(len(problems), 1)
         self.assertIn('timeout', problems[0])
+
+    def test_gyazo_failure_is_not_checked_daily(self):
+        # Gyazoは/statusでは確認するが、毎日の自動ヘルスチェック対象からは除外している
+        with patch.object(bot, 'name_linker') as mock_name_linker:
+            mock_name_linker.check_connection.return_value = (True, '接続OK')
+            with patch.object(bot, 'check_youtube_connection', return_value=(None, '未設定')):
+                with patch.object(bot, 'credit_extractor') as mock_credit_extractor:
+                    mock_credit_extractor.check_connection.return_value = (True, '接続OK')
+                    with patch.object(bot, 'gyazo_uploader') as mock_gyazo:
+                        mock_gyazo.check_connection.return_value = (False, 'トークン失効')
+                        problems = bot.run_daily_health_checks()
+        self.assertEqual(problems, [])
+        mock_gyazo.check_connection.assert_not_called()
 
 
 class FetchRandomArticleTests(unittest.TestCase):
