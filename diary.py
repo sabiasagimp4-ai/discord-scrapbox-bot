@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -9,6 +10,11 @@ JST = timezone(timedelta(hours=9))
 
 VOCAB_HEADING = '【新しく知った単語】'
 DIARY_HEADING = '【日記】'
+
+# 雛形のナビゲーション行（<- [前日] / [当日] / [翌日] ->）。日付が入るため
+# 固定文字列では判定できず、「本文が空かどうか」の判定にはパターンで照合する。
+NAV_LINE_RE = re.compile(r'^<-\s*\[[^\]]+\]\s*/\s*\[[^\]]+\]\s*/\s*\[[^\]]+\]\s*->$')
+DIARY_TAG = '#日記'
 
 # DM本文がこの接頭辞（半角/全角コロンどちらでも可）で始まる場合、
 # 【日記】ではなく VOCAB_HEADING（見出しの直前）に挿入する。
@@ -39,6 +45,24 @@ def build_template(dt):
         '',
         DIARY_HEADING,
     ]
+
+
+def is_entry_line(line):
+    """その行が「自分で書いた内容」かどうかを判定する。空行・#日記タグ・
+    ナビゲーション行・見出し行は雛形の一部なので内容とは見なさない。
+    雛形を手で書き換えていても壊れないよう、build_template()の出力と丸ごと
+    比較するのではなく、行の形で判定する。"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped in (DIARY_TAG, VOCAB_HEADING, DIARY_HEADING):
+        return False
+    return not NAV_LINE_RE.match(stripped)
+
+
+def has_entries(body_lines):
+    """日記ページの本文（タイトル行を除く）に、雛形以外の記入があるかを返す"""
+    return any(is_entry_line(line) for line in body_lines)
 
 
 def create_diary_page(project, sid, dt=None):
@@ -104,6 +128,46 @@ def _insert_before_heading(body_lines, heading, new_lines):
     body_lines.extend(new_lines)
 
 
+def fetch_body_lines(project, sid, title):
+    """日記ページ本文（タイトル行を除く行リスト）を取得する。
+    戻り値: (ok, body_lines)
+      ok=False は通信・パース失敗（「ページが空」と区別するために必要）。
+      ページが存在しない場合は (True, []) を返す。"""
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(title)}',
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception:
+        return False, []
+
+    if r.status_code != 200:
+        return True, []
+    try:
+        data = r.json()
+    except Exception:
+        return False, []
+    if not data.get('persistent'):
+        return True, []
+    page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
+    return True, page_lines[1:]
+
+
+def check_diary_written(project, sid, dt=None):
+    """指定日（省略時は現在時刻・JST）の日記ページに記入があるかを確認する。
+    ページが存在しない場合・雛形のままの場合はどちらも 'empty' とする
+    （利用者から見れば「まだ何も書いていない」で同じであるため）。
+    戻り値: (state, title)
+      state: 'written' / 'empty' / None（通信失敗。空と誤判定して催促しないため区別する）"""
+    dt = dt or datetime.now(JST)
+    title = diary_title_for(dt)
+    ok, body_lines = fetch_body_lines(project, sid, title)
+    if not ok:
+        return None, title
+    return ('written' if has_entries(body_lines) else 'empty'), title
+
+
 def append_diary_entry(project, sid, text, section='diary', dt=None):
     """指定日（省略時は現在時刻・JST）の日記ページに本文を追記する。
     section='diary'（既定）は DIARY_HEADING 欄の末尾（ページ末尾）に追記し、
@@ -116,24 +180,9 @@ def append_diary_entry(project, sid, text, section='diary', dt=None):
     dt = dt or datetime.now(JST)
     title = diary_title_for(dt)
 
-    try:
-        r = requests.get(
-            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(title)}',
-            headers={'Cookie': f'connect.sid={sid}'},
-            timeout=10,
-        )
-    except Exception:
+    ok, body_lines = fetch_body_lines(project, sid, title)
+    if not ok:
         return None, title
-
-    body_lines = []
-    if r.status_code == 200:
-        try:
-            data = r.json()
-        except Exception:
-            return None, title
-        if data.get('persistent'):
-            page_lines = [line.get('text', '') if isinstance(line, dict) else line for line in data.get('lines', [])]
-            body_lines = page_lines[1:]
     if not body_lines:
         body_lines = build_template(dt)
 

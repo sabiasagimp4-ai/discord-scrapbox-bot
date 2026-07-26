@@ -1,6 +1,7 @@
+import asyncio
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import bot
 
@@ -675,6 +676,104 @@ class DiaryWebhookRequestTests(unittest.TestCase):
             status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "hi"}')
         self.assertEqual(status, 502)
         self.assertIn('error', payload)
+
+
+class EnvHourTests(unittest.TestCase):
+    def test_reads_valid_hour(self):
+        with patch.dict(bot.os.environ, {'X_HOUR': '7'}):
+            self.assertEqual(bot._env_hour('X_HOUR', 22), 7)
+
+    def test_unset_falls_back_to_default(self):
+        with patch.dict(bot.os.environ, {}, clear=True):
+            self.assertEqual(bot._env_hour('X_HOUR', 22), 22)
+
+    def test_out_of_range_falls_back_to_default(self):
+        with patch.dict(bot.os.environ, {'X_HOUR': '25'}):
+            self.assertEqual(bot._env_hour('X_HOUR', 22), 22)
+
+    def test_non_numeric_falls_back_to_default(self):
+        with patch.dict(bot.os.environ, {'X_HOUR': 'とんでもない値'}):
+            self.assertEqual(bot._env_hour('X_HOUR', 22), 22)
+
+
+class DiaryReminderMessageTests(unittest.TestCase):
+    def test_message_includes_date_and_page_url(self):
+        message = bot.build_diary_reminder_message('2026-07-06', 'my-diary')
+        self.assertIn('2026-07-06', message)
+        self.assertIn('https://scrapbox.io/my-diary/2026-07-06', message)
+
+    def test_message_explains_dm_reply_shortcut(self):
+        # 「開いて書く」より軽い手段（DM返信・単語:）を毎回添える
+        message = bot.build_diary_reminder_message('2026-07-06', 'my-diary')
+        self.assertIn('返信', message)
+        self.assertIn('単語:', message)
+
+
+class DiaryReminderTaskTests(unittest.TestCase):
+    def setUp(self):
+        patches = [
+            patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
+            patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
+            patch.object(bot, 'DIARY_OWNER_USER_ID', 123),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.dm = patch.object(bot, 'send_diary_reminder_dm', new_callable=AsyncMock).start()
+        self.addCleanup(patch.stopall)
+
+    def _run(self):
+        asyncio.run(bot.diary_reminder_task.coro())
+
+    def test_empty_diary_sends_dm(self):
+        with patch.object(bot.diary, 'check_diary_written', return_value=('empty', '2026-07-06')) as mock_check:
+            self._run()
+        mock_check.assert_called_once_with('diary-proj', 'sid')
+        self.dm.assert_awaited_once_with('2026-07-06')
+
+    def test_written_diary_sends_nothing(self):
+        with patch.object(bot.diary, 'check_diary_written', return_value=('written', '2026-07-06')):
+            self._run()
+        self.dm.assert_not_awaited()
+
+    def test_check_failure_does_not_send_dm(self):
+        # Scrapboxに繋がらなかっただけで催促すると、書いてある日にもDMが飛ぶ
+        with patch.object(bot.diary, 'check_diary_written', return_value=(None, '2026-07-06')):
+            self._run()
+        self.dm.assert_not_awaited()
+        self.assertEqual(bot._task_last_runs['日記リマインド']['ok'], False)
+
+    def test_dm_failure_is_recorded_not_raised(self):
+        self.dm.side_effect = Exception('DMを送れません')
+        with patch.object(bot.diary, 'check_diary_written', return_value=('empty', '2026-07-06')):
+            self._run()
+        self.assertEqual(bot._task_last_runs['日記リマインド']['ok'], False)
+
+
+class SendDiaryReminderDmTests(unittest.TestCase):
+    def test_dm_is_sent_to_owner(self):
+        user = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = user
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'my-diary'):
+            asyncio.run(bot.send_diary_reminder_dm('2026-07-06'))
+        fake_client.get_user.assert_called_once_with(123)
+        user.send.assert_awaited_once()
+        self.assertIn('2026-07-06', user.send.await_args.args[0])
+
+    def test_uncached_user_is_fetched(self):
+        user = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = None
+        fake_client.fetch_user = AsyncMock(return_value=user)
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'my-diary'):
+            asyncio.run(bot.send_diary_reminder_dm('2026-07-06'))
+        fake_client.fetch_user.assert_awaited_once_with(123)
+        user.send.assert_awaited_once()
 
 
 class ReactionActionTests(unittest.TestCase):

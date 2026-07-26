@@ -46,6 +46,19 @@ DIARY_OWNER_USER_ID = int(os.environ.get('DIARY_OWNER_USER_ID') or '0')
 # インターネットに公開されているため、これが無ければ機能自体を無効化する。
 DIARY_WEBHOOK_TOKEN = os.environ.get('DIARY_WEBHOOK_TOKEN', '')
 
+
+def _env_hour(name, default):
+    """時刻指定の環境変数を0〜23の整数として読む。不正値なら既定値にフォールバックする
+    （設定ミスでBotの起動自体が落ちるのを避ける）。"""
+    raw = os.environ.get(name, '').strip()
+    if raw.isdigit() and 0 <= int(raw) <= 23:
+        return int(raw)
+    return default
+
+
+# 日記の書き込み催促DMを送る時刻（JSTの時。分は0固定）。
+DIARY_REMINDER_HOUR = _env_hour('DIARY_REMINDER_HOUR', 22)
+
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
 _alias_map_cache = None
@@ -607,6 +620,45 @@ async def create_daily_diary_page_task():
         _mark_task_run('日記ページ作成', False, e)
 
 
+def build_diary_reminder_message(title, project):
+    """日記の催促DM本文を組み立てる。そのまま返信すれば追記されることを毎回添え、
+    「開いて書く」より軽い手段を提示する。"""
+    url = f'https://scrapbox.io/{project}/{requests.utils.quote(title)}'
+    return (
+        f'📔 {title} の日記がまだ空です。今日はどんな一日でしたか？\n'
+        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。\n'
+        f'{url}'
+    )
+
+
+async def send_diary_reminder_dm(title):
+    user = client.get_user(DIARY_OWNER_USER_ID) or await client.fetch_user(DIARY_OWNER_USER_ID)
+    await user.send(build_diary_reminder_message(title, DIARY_SCRAPBOX_PROJECT))
+
+
+@tasks.loop(time=dt_time(hour=DIARY_REMINDER_HOUR, minute=0, tzinfo=JST))
+async def diary_reminder_task():
+    """その日の日記ページが雛形のまま（または未作成）なら、本人にDMで書き込みを催促する。
+    既に何か書いてあれば何も送らない（毎日必ず届く通知は読み飛ばされるようになるため）。
+    Scrapboxに繋がらず確認できなかった場合も送らない（空だと誤断定しないため）。"""
+    try:
+        state, title = await asyncio.to_thread(
+            diary.check_diary_written, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID
+        )
+        if state is None:
+            record_error('diary_reminder', f'{title} の記入確認に失敗（Scrapboxに接続できません）')
+            _mark_task_run('日記リマインド', False, '記入確認に失敗')
+            return
+        if state == 'written':
+            _mark_task_run('日記リマインド', True, f'記入済みのため催促なし: {title}')
+            return
+        await send_diary_reminder_dm(title)
+        _mark_task_run('日記リマインド', True, f'催促DMを送信: {title}')
+    except Exception as e:
+        record_error('diary_reminder', e)
+        _mark_task_run('日記リマインド', False, e)
+
+
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
@@ -624,6 +676,9 @@ async def on_ready():
         notify_new_pages.start()
     if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and not create_daily_diary_page_task.is_running():
         create_daily_diary_page_task.start()
+    # 催促DMの宛先が要るため、DM追記と同じく DIARY_OWNER_USER_ID も揃って初めて起動する
+    if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_OWNER_USER_ID and not diary_reminder_task.is_running():
+        diary_reminder_task.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')
