@@ -226,5 +226,72 @@ class AppendDiaryEntryTests(unittest.TestCase):
         self.assertRegex(called_url, r'\d{4}-\d{2}-\d{2}')
 
 
+class HasEntriesTests(unittest.TestCase):
+    def test_fresh_template_has_no_entries(self):
+        self.assertFalse(diary.has_entries(diary.build_template(NOW)))
+
+    def test_empty_body_has_no_entries(self):
+        self.assertFalse(diary.has_entries([]))
+
+    def test_diary_entry_counts_as_written(self):
+        body = diary.build_template(NOW) + [' 今日は楽しかった']
+        self.assertTrue(diary.has_entries(body))
+
+    def test_vocab_entry_counts_as_written(self):
+        body = list(diary.build_template(NOW))
+        diary._insert_before_heading(body, diary.DIARY_HEADING, [' [serendipity]'])
+        self.assertTrue(diary.has_entries(body))
+
+    def test_whitespace_only_lines_are_not_entries(self):
+        self.assertFalse(diary.has_entries(['   ', '\t', '']))
+
+    def test_nav_line_of_any_date_is_not_an_entry(self):
+        self.assertFalse(diary.has_entries(['<- [2028-02-28] / [2028-02-29] / [2028-03-01] ->']))
+
+    def test_indented_headings_are_still_template(self):
+        # Scrapbox上でインデントされていても見出しは雛形の一部
+        self.assertFalse(diary.has_entries([' 【日記】', ' #日記']))
+
+
+class CheckDiaryWrittenTests(unittest.TestCase):
+    def test_template_only_page_is_empty(self):
+        existing = {'persistent': True, 'lines': [{'text': '2026-07-06'}] + [
+            {'text': line} for line in diary.build_template(NOW)
+        ]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            state, title = diary.check_diary_written('proj', 'sid', dt=NOW)
+        self.assertEqual((state, title), ('empty', '2026-07-06'))
+
+    def test_page_with_entry_is_written(self):
+        existing = {'persistent': True, 'lines': [
+            {'text': '2026-07-06'}, {'text': '【日記】'}, {'text': ' 今日は楽しかった'},
+        ]}
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data=existing)):
+            state, _ = diary.check_diary_written('proj', 'sid', dt=NOW)
+        self.assertEqual(state, 'written')
+
+    def test_missing_page_is_empty(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            state, title = diary.check_diary_written('proj', 'sid', dt=NOW)
+        self.assertEqual((state, title), ('empty', '2026-07-06'))
+
+    def test_non_persistent_page_is_empty(self):
+        with patch('diary.requests.get', return_value=FakeResponse(200, json_data={'persistent': False})):
+            state, _ = diary.check_diary_written('proj', 'sid', dt=NOW)
+        self.assertEqual(state, 'empty')
+
+    def test_network_failure_returns_none_not_empty(self):
+        # 通信失敗を「空」と扱うと、書いてあるのに催促DMが飛んでしまう
+        with patch('diary.requests.get', side_effect=Exception('timeout')):
+            state, title = diary.check_diary_written('proj', 'sid', dt=NOW)
+        self.assertIsNone(state)
+        self.assertEqual(title, '2026-07-06')
+
+    def test_defaults_to_now_when_dt_omitted(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)) as mock_get:
+            diary.check_diary_written('proj', 'sid')
+        self.assertRegex(mock_get.call_args.args[0], r'\d{4}-\d{2}-\d{2}')
+
+
 if __name__ == '__main__':
     unittest.main()
