@@ -1,6 +1,11 @@
 import json
+import re
 
 import requests
+
+# 既にScrapboxの記法になっている部分。この中は自動リンク化の対象から外す
+# （[]の二重付与や、URL・タグの途中で切ってリンクを壊すのを防ぐ）。
+_PROTECTED_RE = re.compile(r'\[[^\[\]]*\]|https?://\S+|#\S+')
 
 
 def load_existing_pages(project, sid):
@@ -250,6 +255,61 @@ def resolve_name(name, pages, alias_map):
         return f'[{best_page}]'
 
     return name
+
+
+def _lower(s):
+    """照合用の小文字化。一部の文字（İ など）は小文字化すると文字数が変わり、
+    元の文字列と位置がずれてリンクを挿入する場所を誤る。そういう文字列は
+    小文字化せず、大文字小文字を区別して照合する（誤リンクより取りこぼしを選ぶ）。"""
+    lowered = s.lower()
+    return lowered if len(lowered) == len(s) else s
+
+
+def _link_segment(segment, candidates):
+    """記法で保護されていない範囲について、既存ページ名に一致する部分を [ ] で囲む。
+    candidates は (ページ名, 照合用に小文字化したページ名) を長い順に並べたもので、
+    先に見つかった＝最も長い一致を採用する（「Blender」と「Blender Guru」なら後者）。"""
+    haystack = segment.lower()
+    # 小文字化で長さが変わる場合は本文を元の表記のまま照合する（ページ名側も元の表記を使う）
+    case_insensitive = len(haystack) == len(segment)
+    if not case_insensitive:
+        haystack = segment
+    out = []
+    i = 0
+    while i < len(segment):
+        for title, title_lower in candidates:
+            if haystack.startswith(title_lower if case_insensitive else title, i):
+                out.append(f'[{title}]')
+                i += len(title)
+                break
+        else:
+            out.append(segment[i])
+            i += 1
+    return ''.join(out)
+
+
+def link_known_pages(text, pages, min_length=2):
+    """本文中に出てくる既存ページ名をScrapboxのリンク記法 [ページ名] に変換する。
+    大文字小文字は無視して照合し、置き換えにはページ側の表記を使う（「scrapbox」と
+    書いても [Scrapbox] ページに繋がるようにするため）。
+    min_length未満の短いページ名は、無関係な文字列に当たって誤リンクを量産するので対象外。"""
+    candidates = sorted(
+        {p.strip() for p in pages if len(p.strip()) >= min_length},
+        key=len,
+        reverse=True,
+    )
+    if not candidates:
+        return text
+    candidates = [(title, _lower(title)) for title in candidates]
+
+    out = []
+    pos = 0
+    for m in _PROTECTED_RE.finditer(text):
+        out.append(_link_segment(text[pos:m.start()], candidates))
+        out.append(m.group())
+        pos = m.end()
+    out.append(_link_segment(text[pos:], candidates))
+    return ''.join(out)
 
 
 def _normalize(s):

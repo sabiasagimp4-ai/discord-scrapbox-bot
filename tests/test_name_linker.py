@@ -302,5 +302,62 @@ class CheckConnectionTests(unittest.TestCase):
         self.assertEqual(message, 'network error')
 
 
+class LinkKnownPagesTests(unittest.TestCase):
+    def test_wraps_known_page_name_in_brackets(self):
+        result = name_linker.link_known_pages('今日はBlenderを触った', ['Blender'])
+        self.assertEqual(result, '今日は[Blender]を触った')
+
+    def test_leaves_unknown_words_untouched(self):
+        result = name_linker.link_known_pages('今日はMayaを触った', ['Blender'])
+        self.assertEqual(result, '今日はMayaを触った')
+
+    def test_matches_case_insensitively_and_uses_page_spelling(self):
+        # 「scrapbox」と書いても [Scrapbox] ページに繋がってほしい
+        result = name_linker.link_known_pages('scrapboxに書いた', ['Scrapbox'])
+        self.assertEqual(result, '[Scrapbox]に書いた')
+
+    def test_prefers_the_longest_match(self):
+        result = name_linker.link_known_pages('Blender Guruを見た', ['Blender', 'Blender Guru'])
+        self.assertEqual(result, '[Blender Guru]を見た')
+
+    def test_does_not_double_wrap_existing_links(self):
+        result = name_linker.link_known_pages('[Blender]を触った', ['Blender'])
+        self.assertEqual(result, '[Blender]を触った')
+
+    def test_does_not_touch_urls(self):
+        # URLの一部がページ名と一致しても、途中に[]が入るとリンクが壊れる
+        result = name_linker.link_known_pages('https://example.com/Blender を見た', ['Blender'])
+        self.assertEqual(result, 'https://example.com/Blender を見た')
+
+    def test_does_not_touch_tags(self):
+        result = name_linker.link_known_pages('#Blender の話', ['Blender'])
+        self.assertEqual(result, '#Blender の話')
+
+    def test_links_text_around_protected_parts(self):
+        result = name_linker.link_known_pages('[Maya] と Blender', ['Blender', 'Maya'])
+        self.assertEqual(result, '[Maya] と [Blender]')
+
+    def test_links_every_occurrence(self):
+        result = name_linker.link_known_pages('Blenderの話。Blenderは良い', ['Blender'])
+        self.assertEqual(result, '[Blender]の話。[Blender]は良い')
+
+    def test_ignores_titles_shorter_than_min_length(self):
+        # 1文字のページ名は無関係な文字に当たって誤リンクを量産する
+        result = name_linker.link_known_pages('今日は良い日', ['日'])
+        self.assertEqual(result, '今日は良い日')
+
+    def test_no_pages_returns_text_unchanged(self):
+        self.assertEqual(name_linker.link_known_pages('今日は良い日', []), '今日は良い日')
+
+    def test_length_changing_lowercase_does_not_shift_the_brackets(self):
+        # 「İ」は小文字化すると2文字になり、位置がずれると無関係な場所に[]が入る
+        result = name_linker.link_known_pages('İstanbulでBlenderを触った', ['Blender'])
+        self.assertEqual(result, 'İstanbulで[Blender]を触った')
+
+    def test_multiline_text_is_linked_on_every_line(self):
+        result = name_linker.link_known_pages('Blenderを触った\nMayaも触った', ['Blender', 'Maya'])
+        self.assertEqual(result, '[Blender]を触った\n[Maya]も触った')
+
+
 if __name__ == '__main__':
     unittest.main()

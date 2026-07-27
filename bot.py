@@ -58,9 +58,14 @@ def _env_hour(name, default):
 
 # 日記の書き込み催促DMを送る時刻（JSTの時。分は0固定）。
 DIARY_REMINDER_HOUR = _env_hour('DIARY_REMINDER_HOUR', 22)
+# 日記本文に出てくる既存ページ名を自動でリンク記法にするか。'0'で無効化できる
+# （書いたままの文章を残したい場合に、後から戻せる逃げ道を用意しておく）。
+DIARY_AUTOLINK = os.environ.get('DIARY_AUTOLINK', '1').strip() != '0'
 
 PAGES_CACHE_TTL = 300
 _pages_cache = {'pages': [], 'ts': 0.0}
+# 日記プロジェクト側のページ一覧（自動リンク用）。共有プロジェクトとは別なので別枠で持つ。
+_diary_pages_cache = {'pages': [], 'ts': 0.0}
 _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
@@ -281,6 +286,31 @@ def get_existing_pages():
         _pages_cache['pages'] = name_linker.load_existing_pages(SCRAPBOX_PROJECT, SCRAPBOX_SID)
         _pages_cache['ts'] = now
     return _pages_cache['pages']
+
+
+def get_diary_pages():
+    """日記プロジェクトの既存ページ一覧を返す（自動リンク用、TTL付きキャッシュ）。
+    DMを送るたびに全ページを取りに行くと追記が目に見えて遅くなるため、共有プロジェクト側と
+    同じくキャッシュする。新しく作ったページが最大 PAGES_CACHE_TTL 秒リンクされないのは許容。"""
+    now = time.time()
+    if now - _diary_pages_cache['ts'] > PAGES_CACHE_TTL:
+        _diary_pages_cache['pages'] = name_linker.load_existing_pages(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
+        _diary_pages_cache['ts'] = now
+    return _diary_pages_cache['pages']
+
+
+def autolink_diary_text(text):
+    """日記本文中の既存ページ名をリンク記法に変換する（同期関数）。
+    リンク化はあくまで付加価値なので、ページ一覧の取得に失敗しても本文は素通しし、
+    追記そのものは必ず成功させる。"""
+    if not DIARY_AUTOLINK or not text:
+        return text
+    try:
+        pages = diary.linkable_page_titles(get_diary_pages())
+        return name_linker.link_known_pages(text, pages)
+    except Exception as e:
+        record_error('diary_autolink', e)
+        return text
 
 
 def get_alias_map():
@@ -620,13 +650,16 @@ async def create_daily_diary_page_task():
         _mark_task_run('日記ページ作成', False, e)
 
 
-def build_diary_reminder_message(title, project):
+def build_diary_reminder_message(title, project, dt=None):
     """日記の催促DM本文を組み立てる。そのまま返信すれば追記されることを毎回添え、
-    「開いて書く」より軽い手段を提示する。"""
+    「開いて書く」より軽い手段を提示する。あわせてその日のお題を1つ出し、
+    「何を書けばいいか分からない」で止まらないようにする。"""
     url = f'https://scrapbox.io/{project}/{requests.utils.quote(title)}'
+    prompt = diary.prompt_for(dt or datetime.now(JST))
     return (
-        f'📔 {title} の日記がまだ空です。今日はどんな一日でしたか？\n'
-        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。\n'
+        f'📔 {title} の日記がまだ空です。\n'
+        f'今日のお題: {prompt}\n'
+        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。写真もそのまま送れます。\n'
         f'{url}'
     )
 
@@ -1252,9 +1285,45 @@ async def alias_list_command(interaction: discord.Interaction):
     await interaction.followup.send(text)
 
 
+async def upload_diary_images(attachments):
+    """DMに添付された画像をGyazoにアップロードし、Scrapboxに貼れる行のリストを返す。
+    Discordの添付URLは時間が経つと失効するため、そのまま貼らずGyazoの恒久URLに変換する。
+    画像以外の添付は無視する（Scrapboxに貼っても表示できないため）。"""
+    lines = []
+    for attachment in attachments:
+        if not (attachment.content_type or '').startswith('image/'):
+            continue
+        try:
+            data = await attachment.read()
+            url = await asyncio.to_thread(gyazo_uploader.upload_image, data, attachment.filename)
+        except Exception as e:
+            record_error('diary_dm', e)
+            continue
+        if url:
+            lines.append(f'[{url}]')
+        else:
+            record_error('diary_dm', f'{attachment.filename} のGyazoアップロードに失敗しました')
+    return lines
+
+
+def build_diary_entries(text, image_lines):
+    """DM1通を「どの欄に何を書くか」の (section, 本文) リストに変換する。
+    写真は【日記】欄に入れる（その日の記録であって単語ではないため）ので、
+    「単語:」で始まるDMに写真が付いていた場合だけ2件に分かれる。"""
+    section, body = diary.classify_entry(text) if text else ('diary', '')
+    if section == 'vocab':
+        entries = [('vocab', body)] if body else []
+        if image_lines:
+            entries.append(('diary', '\n'.join(image_lines)))
+        return entries
+    combined = '\n'.join(([body] if body else []) + image_lines)
+    return [('diary', combined)] if combined else []
+
+
 async def handle_diary_dm(message):
     """個人のDMで送った内容を、その日の日記ページに自動追記する。先頭が「単語:」の
-    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。
+    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。画像を添付すると
+    Gyazo経由で日記に貼られる（本文なしで写真だけ送ってもよい）。
     DIARY_SCRAPBOX_PROJECT/SID/DIARY_OWNER_USER_ID がすべて設定済みで、かつ送信者が
     本人（DIARY_OWNER_USER_ID）の場合のみ動作する。Karureサーバーの誰でもこのBotに
     DMを送れてしまうため、本人確認は必須（でなければ他人のDMが日記に混入する）。"""
@@ -1263,18 +1332,28 @@ async def handle_diary_dm(message):
     if message.author.id != DIARY_OWNER_USER_ID:
         return
     text = message.content.strip()
-    if not text:
+    if not text and not message.attachments:
         return
-    section, body = diary.classify_entry(text)
 
+    image_lines = await upload_diary_images(message.attachments)
+    entries = build_diary_entries(text, image_lines)
+    if not entries:
+        return
+
+    status, title = None, None
     async with _diary_dm_lock:
-        try:
-            status, title = await asyncio.to_thread(
-                diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
-            )
-        except Exception as e:
-            record_error('diary_dm', e)
-            status, title = None, None
+        for section, body in entries:
+            if section == 'diary':
+                body = await asyncio.to_thread(autolink_diary_text, body)
+            try:
+                status, title = await asyncio.to_thread(
+                    diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
+                )
+            except Exception as e:
+                record_error('diary_dm', e)
+                status, title = None, None
+            if status != 'appended':
+                break
 
     try:
         await message.add_reaction('✅' if status == 'appended' else '❌')
@@ -1396,6 +1475,8 @@ def handle_diary_webhook_request(token, raw_body):
         return 400, {'error': 'text が空です'}
 
     section, body = diary.classify_entry(text)
+    if section == 'diary':
+        body = autolink_diary_text(body)
     status, title = diary.append_diary_entry(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section)
     if status == 'appended':
         return 200, {'status': 'appended', 'title': title, 'section': section}

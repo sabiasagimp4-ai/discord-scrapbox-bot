@@ -64,6 +64,44 @@ class UploadThumbnailTests(unittest.TestCase):
         self.assertEqual(result, '')
 
 
+class UploadImageTests(unittest.TestCase):
+    def test_no_access_token_returns_empty_without_network(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', ''):
+            with patch('gyazo_uploader.requests.post') as mock_post:
+                result = gyazo_uploader.upload_image(b'fake-bytes', 'photo.png')
+        mock_post.assert_not_called()
+        self.assertEqual(result, '')
+
+    def test_empty_data_returns_empty_without_network(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.post') as mock_post:
+                result = gyazo_uploader.upload_image(b'', 'photo.png')
+        mock_post.assert_not_called()
+        self.assertEqual(result, '')
+
+    def test_successful_upload_returns_gyazo_url_with_filename(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch(
+                'gyazo_uploader.requests.post',
+                return_value=FakeResponse(200, {'url': 'https://i.gyazo.com/abc.png'}),
+            ) as mock_post:
+                result = gyazo_uploader.upload_image(b'fake-bytes', 'photo.png')
+        self.assertEqual(result, 'https://i.gyazo.com/abc.png')
+        self.assertEqual(mock_post.call_args.kwargs['files']['imagedata'], ('photo.png', b'fake-bytes'))
+
+    def test_upload_api_failure_returns_empty(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.post', return_value=FakeResponse(401)):
+                result = gyazo_uploader.upload_image(b'fake-bytes', 'photo.png')
+        self.assertEqual(result, '')
+
+    def test_request_exception_returns_empty(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.post', side_effect=Exception('network error')):
+                result = gyazo_uploader.upload_image(b'fake-bytes', 'photo.png')
+        self.assertEqual(result, '')
+
+
 class CheckConnectionTests(unittest.TestCase):
     def test_no_access_token_returns_none_without_network(self):
         with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', ''):
