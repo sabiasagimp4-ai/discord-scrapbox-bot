@@ -8,7 +8,12 @@ import requests
 _PROTECTED_RE = re.compile(r'\[[^\[\]]*\]|https?://\S+|#\S+')
 
 
-def load_existing_pages(project, sid):
+def fetch_all_page_titles(project, sid):
+    """プロジェクトの全ページタイトルを取得する。
+    戻り値: (ok, titles)
+      ok=False は途中で失敗した＝一覧が欠けていることを意味する。
+      「ページが減った」と「取得できなかった」を取り違えると、新規ページ通知が
+      既存ページを新規と誤認して大量に投稿してしまうため、呼び出し側で区別できるようにする。"""
     pages = []
     skip = 0
     while True:
@@ -20,15 +25,23 @@ def load_existing_pages(project, sid):
                 timeout=10,
             )
         except Exception:
-            break
+            return False, pages
         if r.status_code != 200:
-            break
-        batch = r.json().get('pages', [])
+            return False, pages
+        try:
+            batch = r.json().get('pages', [])
+        except Exception:
+            return False, pages
         pages.extend(p['title'] for p in batch)
         if len(batch) < 1000:
-            break
+            return True, pages
         skip += 1000
-    return pages
+
+
+def load_existing_pages(project, sid):
+    """全ページタイトルのリストを返す。取得に失敗した分は欠ける（完全性が要る場合は
+    fetch_all_page_titles を使うこと）。"""
+    return fetch_all_page_titles(project, sid)[1]
 
 
 def load_alias_map(project, sid, mapping_page_title):

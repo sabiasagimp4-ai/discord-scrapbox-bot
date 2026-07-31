@@ -24,6 +24,23 @@ class NormalizeTitleTests(unittest.TestCase):
     def test_strips_surrounding_whitespace(self):
         self.assertEqual(bot._normalize_title('  タイトル  '), 'タイトル')
 
+    def test_square_brackets_become_parentheses(self):
+        # Scrapboxはタイトルに [ ] を含められず、そのまま送ると400で弾かれる
+        self.assertEqual(
+            bot._normalize_title('ChouCho - Defy the Silence [Lyric MV]'),
+            'ChouCho - Defy the Silence (Lyric MV)',
+        )
+
+    def test_multiple_and_unbalanced_brackets_are_converted(self):
+        self.assertEqual(
+            bot._normalize_title('【歌ってみた】朔雀 - シンデレラ [DECO*27 Cover] ['),
+            '【歌ってみた】朔雀 - シンデレラ (DECO*27 Cover) (',
+        )
+
+    def test_full_width_brackets_are_kept(self):
+        # 全角の 【 】 はScrapboxでも使えるので触らない
+        self.assertEqual(bot._normalize_title('【MV】タイトル'), '【MV】タイトル')
+
 
 class ExtractOgImageTests(unittest.TestCase):
     def test_property_before_content(self):
@@ -298,20 +315,123 @@ class ProcessUrlsTests(unittest.TestCase):
 
 class GetExistingPagesTests(unittest.TestCase):
     def test_cache_is_used_within_ttl(self):
-        fresh_cache = {'pages': ['既存ページ'], 'ts': bot.time.time()}
+        fresh_cache = {'pages': ['既存ページ'], 'ts': bot.time.time(), 'complete': True}
         with patch.object(bot, '_pages_cache', fresh_cache):
-            with patch('bot.name_linker.load_existing_pages') as mock_load:
+            with patch('bot.name_linker.fetch_all_page_titles') as mock_load:
                 result = bot.get_existing_pages()
         mock_load.assert_not_called()
         self.assertEqual(result, ['既存ページ'])
 
     def test_cache_refreshes_after_ttl_expires(self):
-        stale_cache = {'pages': ['古いページ'], 'ts': 0.0}
+        stale_cache = {'pages': ['古いページ'], 'ts': 0.0, 'complete': True}
         with patch.object(bot, '_pages_cache', stale_cache):
-            with patch('bot.name_linker.load_existing_pages', return_value=['新しいページ']) as mock_load:
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(True, ['新しいページ'])) as mock_load:
                 result = bot.get_existing_pages()
         mock_load.assert_called_once()
         self.assertEqual(result, ['新しいページ'])
+
+    def test_incomplete_fetch_keeps_the_previous_list(self):
+        # 欠けた一覧で上書きすると、次に取得できたときに既存ページが全部「新規」になる
+        stale_cache = {'pages': ['ページA', 'ページB'], 'ts': 0.0, 'complete': True}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(False, ['ページA'])):
+                complete, pages = bot.get_existing_pages_status()
+        self.assertFalse(complete)
+        self.assertEqual(pages, ['ページA', 'ページB'])
+
+    def test_incomplete_fetch_still_advances_the_cache_timestamp(self):
+        # 失敗のたびに全ページ取得を叩き直さない
+        stale_cache = {'pages': [], 'ts': 0.0, 'complete': True}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(False, [])) as mock_load:
+                bot.get_existing_pages_status()
+                bot.get_existing_pages_status()
+        mock_load.assert_called_once()
+
+    def test_successful_fetch_is_reported_as_complete(self):
+        stale_cache = {'pages': [], 'ts': 0.0, 'complete': False}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(True, ['ページA'])):
+                complete, pages = bot.get_existing_pages_status()
+        self.assertTrue(complete)
+        self.assertEqual(pages, ['ページA'])
+
+
+class SelectNotifiableTitlesTests(unittest.TestCase):
+    def test_bot_saved_titles_are_skipped_once(self):
+        with patch.object(bot, '_recently_saved_titles', {'自分で保存した記事'}):
+            self.assertEqual(bot.select_notifiable_titles(['自分で保存した記事', '他人の記事']), ['他人の記事'])
+
+    def test_config_pages_are_skipped(self):
+        with patch.object(bot, 'CREDIT_MAPPING_PAGE', '表記ゆれ'), \
+                patch.object(bot, '_recently_saved_titles', set()):
+            titles = bot.select_notifiable_titles(['表記ゆれ', 'bot設定/監査ログ/2026-07', '記事'])
+        self.assertEqual(titles, ['記事'])
+
+
+class BuildBulkNewPagesMessageTests(unittest.TestCase):
+    def test_message_states_the_total_and_lists_titles(self):
+        message = bot.build_bulk_new_pages_message(['A', 'B', 'C'])
+        self.assertIn('3件', message)
+        self.assertIn('・A', message)
+        self.assertIn('・C', message)
+
+    def test_long_lists_are_truncated(self):
+        titles = [f'記事{i}' for i in range(30)]
+        message = bot.build_bulk_new_pages_message(titles)
+        self.assertIn('30件', message)
+        self.assertIn(f'…ほか{30 - bot.NOTIFY_NEW_PAGES_LIST_MAX}件', message)
+        self.assertNotIn('記事29', message)
+
+
+class NotifyNewPagesTests(unittest.TestCase):
+    def setUp(self):
+        patch.object(bot, '_known_page_titles', None).start()
+        patch.object(bot, '_recently_saved_titles', set()).start()
+        self.channel = MagicMock()
+        self.channel.send = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_channel.return_value = self.channel
+        patch.object(bot, 'client', fake_client).start()
+        self.addCleanup(patch.stopall)
+
+    def _run(self):
+        asyncio.run(bot.notify_new_pages.coro())
+
+    def test_incomplete_page_list_is_not_used_as_a_baseline(self):
+        # ここでベースラインを作ると、次に全件取れたときに既存ページを全部通知してしまう
+        with patch.object(bot, 'get_existing_pages_status', return_value=(False, ['記事A'])):
+            self._run()
+        self.assertIsNone(bot._known_page_titles)
+        self.channel.send.assert_not_awaited()
+        self.assertFalse(bot._task_last_runs['新規ページ通知']['ok'])
+
+    def test_first_complete_run_only_records_the_baseline(self):
+        with patch.object(bot, 'get_existing_pages_status', return_value=(True, ['記事A', '記事B'])):
+            self._run()
+        self.assertEqual(bot._known_page_titles, {'記事A', '記事B'})
+        self.channel.send.assert_not_awaited()
+
+    def test_new_page_is_notified_individually(self):
+        with patch.object(bot, '_known_page_titles', {'記事A'}), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(True, ['記事A', '記事B'])):
+            self._run()
+        self.channel.send.assert_awaited_once()
+        self.assertEqual(self.channel.send.await_args.kwargs['embed'].title, '記事B')
+
+    def test_many_new_pages_are_summarised_in_one_message(self):
+        titles = [f'記事{i}' for i in range(bot.NOTIFY_NEW_PAGES_MAX + 3)]
+        with patch.object(bot, '_known_page_titles', set()), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(True, titles)):
+            self._run()
+        self.channel.send.assert_awaited_once()
+        self.assertIn(f'{len(titles)}件', self.channel.send.await_args.args[0])
+
+    def test_failure_to_fetch_does_not_overwrite_the_baseline(self):
+        with patch.object(bot, '_known_page_titles', {'記事A'}), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(False, [])):
+            self._run()
+            self.assertEqual(bot._known_page_titles, {'記事A'})
 
 
 class FindNewTitlesTests(unittest.TestCase):
@@ -740,7 +860,7 @@ class GetDiaryPagesTests(unittest.TestCase):
         # DMのたびに全ページを取りに行くと追記が目に見えて遅くなる
         with patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'), \
                 patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'), \
-                patch.object(bot.name_linker, 'load_existing_pages', return_value=['Blender']) as mock_load:
+                patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])) as mock_load:
             first = bot.get_diary_pages()
             second = bot.get_diary_pages()
         self.assertEqual(first, ['Blender'])
@@ -748,11 +868,19 @@ class GetDiaryPagesTests(unittest.TestCase):
         mock_load.assert_called_once_with('diary-proj', 'sid')
 
     def test_expired_cache_is_reloaded(self):
-        with patch.object(bot.name_linker, 'load_existing_pages', return_value=['Blender']) as mock_load:
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])) as mock_load:
             bot.get_diary_pages()
             bot._diary_pages_cache['ts'] -= bot.PAGES_CACHE_TTL + 1
             bot.get_diary_pages()
         self.assertEqual(mock_load.call_count, 2)
+
+    def test_incomplete_fetch_keeps_the_previous_list(self):
+        # 欠けた一覧で上書きすると、リンクできるはずの単語が5分間リンクされなくなる
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])):
+            bot.get_diary_pages()
+        bot._diary_pages_cache['ts'] -= bot.PAGES_CACHE_TTL + 1
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(False, [])):
+            self.assertEqual(bot.get_diary_pages(), ['Blender'])
 
 
 class AutolinkDiaryTextTests(unittest.TestCase):

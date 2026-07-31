@@ -63,9 +63,15 @@ DIARY_REMINDER_HOUR = _env_hour('DIARY_REMINDER_HOUR', 22)
 DIARY_AUTOLINK = os.environ.get('DIARY_AUTOLINK', '1').strip() != '0'
 
 PAGES_CACHE_TTL = 300
-_pages_cache = {'pages': [], 'ts': 0.0}
+# complete は「直近の取得で一覧が欠けなく取れたか」。新規ページ通知はこれが False の間、
+# 比較を見送る（欠けた一覧を基準にすると既存ページを新規と誤判定するため）。
+_pages_cache = {'pages': [], 'ts': 0.0, 'complete': False}
 # 日記プロジェクト側のページ一覧（自動リンク用）。共有プロジェクトとは別なので別枠で持つ。
 _diary_pages_cache = {'pages': [], 'ts': 0.0}
+# 1回の巡回で個別に通知する新規ページ数の上限。これを超えたら1通にまとめる
+# （一括インポート等でチャンネルが埋まるのを防ぐ）。
+NOTIFY_NEW_PAGES_MAX = 5
+NOTIFY_NEW_PAGES_LIST_MAX = 10
 _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
@@ -141,9 +147,16 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
 
+# Scrapboxはタイトルに [ ] を含められない（リンク記法と衝突するため400で弾かれる）。
+# YouTubeの動画名には「[Official Music Video]」のような角括弧が頻出するので、
+# 情報を落とさないよう丸括弧に置き換えてから保存する。
+_TITLE_BRACKETS = str.maketrans({'[': '(', ']': ')'})
+
+
 def _normalize_title(title):
-    """Scrapboxのタイトルは改行を含められないため、空白類を1スペースに畳む"""
-    return re.sub(r'\s+', ' ', title).strip()
+    """Scrapboxのタイトルとして使える形に整える。改行を含められないため空白類を
+    1スペースに畳み、使えない [ ] は丸括弧に置き換える。"""
+    return re.sub(r'\s+', ' ', title.translate(_TITLE_BRACKETS)).strip()
 
 
 def _extract_og_image(html):
@@ -280,12 +293,25 @@ def _format_status_line(label, result):
     return f'{"✅" if ok else "❌"} {label}: {detail}'
 
 
-def get_existing_pages():
+def get_existing_pages_status():
+    """(一覧が完全に取れたか, ページ一覧) を返す。取得に失敗したときは欠けた一覧で
+    上書きせず、前回取れた一覧をそのまま返す。欠けた一覧を正解として扱うと、
+    次に取得できたときに既存ページが「新しく増えた」ように見えてしまう。"""
     now = time.time()
     if now - _pages_cache['ts'] > PAGES_CACHE_TTL:
-        _pages_cache['pages'] = name_linker.load_existing_pages(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        ok, pages = name_linker.fetch_all_page_titles(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        # 失敗時もtsは進める（5分間は再取得せず、全ページ取得を叩き続けないため）
         _pages_cache['ts'] = now
-    return _pages_cache['pages']
+        _pages_cache['complete'] = ok
+        if ok:
+            _pages_cache['pages'] = pages
+        else:
+            record_error('pages_cache', 'ページ一覧を完全に取得できませんでした（前回の一覧を使います）')
+    return _pages_cache['complete'], _pages_cache['pages']
+
+
+def get_existing_pages():
+    return get_existing_pages_status()[1]
 
 
 def get_diary_pages():
@@ -294,8 +320,11 @@ def get_diary_pages():
     同じくキャッシュする。新しく作ったページが最大 PAGES_CACHE_TTL 秒リンクされないのは許容。"""
     now = time.time()
     if now - _diary_pages_cache['ts'] > PAGES_CACHE_TTL:
-        _diary_pages_cache['pages'] = name_linker.load_existing_pages(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
+        ok, pages = name_linker.fetch_all_page_titles(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
         _diary_pages_cache['ts'] = now
+        # 欠けた一覧で上書きするとリンクが取りこぼされるので、失敗時は前回の一覧を使う
+        if ok:
+            _diary_pages_cache['pages'] = pages
     return _diary_pages_cache['pages']
 
 
@@ -569,11 +598,38 @@ def find_new_titles(known_titles, current_titles):
     return [title for title in current_titles if title not in known_titles]
 
 
+def select_notifiable_titles(new_titles):
+    """新規タイトルのうち、実際にチャンネルへ通知するものだけを残す。
+    Bot自身が保存したページと設定用ページは通知しない（自分の投稿の二重通知になるため）。"""
+    notifiable = []
+    for title in new_titles:
+        if title in _recently_saved_titles:
+            _recently_saved_titles.discard(title)
+            continue
+        if title == CREDIT_MAPPING_PAGE or title.startswith('bot設定'):
+            continue
+        notifiable.append(title)
+    return notifiable
+
+
+def build_bulk_new_pages_message(titles):
+    """新規ページが一度に大量に増えたときの、1通にまとめた通知文を組み立てる"""
+    lines = [f'📄 Scrapboxに新しいページが{len(titles)}件増えました']
+    lines += [f'・{title}' for title in titles[:NOTIFY_NEW_PAGES_LIST_MAX]]
+    if len(titles) > NOTIFY_NEW_PAGES_LIST_MAX:
+        lines.append(f'…ほか{len(titles) - NOTIFY_NEW_PAGES_LIST_MAX}件')
+    return '\n'.join(lines)
+
+
 @tasks.loop(minutes=5)
 async def notify_new_pages():
     global _known_page_titles
     try:
-        current_titles = await asyncio.to_thread(get_existing_pages)
+        complete, current_titles = await asyncio.to_thread(get_existing_pages_status)
+        if not complete:
+            # 欠けた一覧を基準にすると、次に取得できたときに既存ページが全部「新規」になる
+            _mark_task_run('新規ページ通知', False, 'ページ一覧を取得できず今回は比較を見送り')
+            return
         if _known_page_titles is None:
             _known_page_titles = set(current_titles)
             _mark_task_run('新規ページ通知', True, '初回ベースライン記録')
@@ -581,17 +637,18 @@ async def notify_new_pages():
 
         new_titles = find_new_titles(_known_page_titles, current_titles)
         _known_page_titles = set(current_titles)
-        if not new_titles:
+        notifiable = select_notifiable_titles(new_titles)
+        if not notifiable:
             _mark_task_run('新規ページ通知', True)
             return
 
         channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
-        for title in new_titles:
-            if title in _recently_saved_titles:
-                _recently_saved_titles.discard(title)
-                continue
-            if title == CREDIT_MAPPING_PAGE or title.startswith('bot設定'):
-                continue
+        if len(notifiable) > NOTIFY_NEW_PAGES_MAX:
+            # 一度にこの数を超えるのは一括インポート等の異常時。1件ずつ流すとチャンネルが埋まる
+            await channel.send(build_bulk_new_pages_message(notifiable))
+            _mark_task_run('新規ページ通知', True, f'{len(notifiable)}件をまとめて通知')
+            return
+        for title in notifiable:
             scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
             embed = _build_result_embed(title, scrapbox_url, '', 'Scrapboxに新しいページが投稿されました', discord.Color.gold())
             await channel.send(embed=embed)
@@ -819,7 +876,7 @@ class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        title = self.page_title.value.strip()
+        title = _normalize_title(self.page_title.value)
         body_text = self.body.value or ''
         try:
             status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text, interaction.user.display_name)

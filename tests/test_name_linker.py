@@ -115,6 +115,42 @@ class LoadExistingPagesTests(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class FetchAllPageTitlesTests(unittest.TestCase):
+    def test_complete_fetch_reports_ok(self):
+        batch = [{'title': 'A'}, {'title': 'B'}]
+        with patch('name_linker.requests.get', return_value=FakeResponse(200, {'pages': batch})):
+            ok, titles = name_linker.fetch_all_page_titles('proj', 'sid')
+        self.assertTrue(ok)
+        self.assertEqual(titles, ['A', 'B'])
+
+    def test_request_exception_reports_incomplete(self):
+        # 「取れなかった」を「ページが減った」と取り違えると、新規ページ通知が暴発する
+        with patch('name_linker.requests.get', side_effect=Exception('network error')):
+            ok, titles = name_linker.fetch_all_page_titles('proj', 'sid')
+        self.assertFalse(ok)
+        self.assertEqual(titles, [])
+
+    def test_error_status_reports_incomplete(self):
+        with patch('name_linker.requests.get', return_value=FakeResponse(403)):
+            ok, titles = name_linker.fetch_all_page_titles('proj', 'sid')
+        self.assertFalse(ok)
+
+    def test_failure_midway_returns_the_partial_list_as_incomplete(self):
+        full_batch = [{'title': f'記事{i}'} for i in range(1000)]
+        responses = [FakeResponse(200, {'pages': full_batch}), FakeResponse(500)]
+        with patch('name_linker.requests.get', side_effect=responses):
+            ok, titles = name_linker.fetch_all_page_titles('proj', 'sid')
+        self.assertFalse(ok)
+        self.assertEqual(len(titles), 1000)
+
+    def test_invalid_json_reports_incomplete(self):
+        response = FakeResponse(200)
+        response.json = lambda: (_ for _ in ()).throw(ValueError('not json'))
+        with patch('name_linker.requests.get', return_value=response):
+            ok, titles = name_linker.fetch_all_page_titles('proj', 'sid')
+        self.assertFalse(ok)
+
+
 class AddAliasTests(unittest.TestCase):
     @staticmethod
     def _sent_lines(mock_post):
