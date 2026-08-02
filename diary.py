@@ -20,6 +20,25 @@ DIARY_TAG = '#日記'
 # 【日記】ではなく VOCAB_HEADING（見出しの直前）に挿入する。
 VOCAB_TRIGGER_PREFIXES = ('単語:', '単語：')
 
+# 日付そのものがタイトルの日記ページ。本文中に出てきても自動リンク化しない。
+DATE_TITLE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+# 催促DMに添えるお題。「今日はどうでしたか」だけだと書き出しに詰まるため、
+# 具体的な問いを1つ出して最初の1行のハードルを下げる。
+# 日付から決定的に選ぶ（下記 prompt_for）ので、同じ日に何度確認しても同じお題になる。
+DIARY_PROMPTS = (
+    '今日いちばん時間を使ったことは何でしたか？',
+    '今日、誰かに話したくなったことはありましたか？',
+    '今日はじめて知ったこと・気づいたことは？',
+    '今日いちばん印象に残っている場面を1つ挙げるとしたら？',
+    '今日うまくいったことと、うまくいかなかったことは？',
+    '明日の自分に申し送りしておきたいことは？',
+    '今日、何を見たり聞いたりしましたか？',
+    '今日の体調・気分はどうでしたか？',
+    '今日やろうとして、できなかったことはありますか？',
+    '最近くり返し考えていることはありますか？',
+)
+
 
 def diary_title_for(dt):
     """日記ページのタイトル（YYYY-MM-DD形式）を返す"""
@@ -63,6 +82,24 @@ def is_entry_line(line):
 def has_entries(body_lines):
     """日記ページの本文（タイトル行を除く）に、雛形以外の記入があるかを返す"""
     return any(is_entry_line(line) for line in body_lines)
+
+
+def prompt_for(dt):
+    """その日のお題を返す。日付から決定的に選ぶことで、同じ日に催促が再送されても
+    お題が変わらず、かつ日をまたげば必ず別のお題になる（ランダムだと連日同じお題が
+    出てしまうことがある）。"""
+    return DIARY_PROMPTS[dt.toordinal() % len(DIARY_PROMPTS)]
+
+
+def linkable_page_titles(pages):
+    """日記本文の自動リンク化の対象にするページ名だけを残す。
+    日付ページ（日記そのもの）と #日記 タグのページは、本文中に出てきても
+    リンクにする意味が無い（かつ「日記」は本文に頻出する）ので除外する。"""
+    tag_page = DIARY_TAG.lstrip('#')
+    return [
+        title for title in pages
+        if title and title != tag_page and not DATE_TITLE_RE.match(title)
+    ]
 
 
 def create_diary_page(project, sid, dt=None):

@@ -58,9 +58,20 @@ def _env_hour(name, default):
 
 # 日記の書き込み催促DMを送る時刻（JSTの時。分は0固定）。
 DIARY_REMINDER_HOUR = _env_hour('DIARY_REMINDER_HOUR', 22)
+# 日記本文に出てくる既存ページ名を自動でリンク記法にするか。'0'で無効化できる
+# （書いたままの文章を残したい場合に、後から戻せる逃げ道を用意しておく）。
+DIARY_AUTOLINK = os.environ.get('DIARY_AUTOLINK', '1').strip() != '0'
 
 PAGES_CACHE_TTL = 300
-_pages_cache = {'pages': [], 'ts': 0.0}
+# complete は「直近の取得で一覧が欠けなく取れたか」。新規ページ通知はこれが False の間、
+# 比較を見送る（欠けた一覧を基準にすると既存ページを新規と誤判定するため）。
+_pages_cache = {'pages': [], 'ts': 0.0, 'complete': False}
+# 日記プロジェクト側のページ一覧（自動リンク用）。共有プロジェクトとは別なので別枠で持つ。
+_diary_pages_cache = {'pages': [], 'ts': 0.0}
+# 1回の巡回で個別に通知する新規ページ数の上限。これを超えたら1通にまとめる
+# （一括インポート等でチャンネルが埋まるのを防ぐ）。
+NOTIFY_NEW_PAGES_MAX = 5
+NOTIFY_NEW_PAGES_LIST_MAX = 10
 _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
@@ -136,9 +147,16 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
 
+# Scrapboxはタイトルに [ ] を含められない（リンク記法と衝突するため400で弾かれる）。
+# YouTubeの動画名には「[Official Music Video]」のような角括弧が頻出するので、
+# 情報を落とさないよう丸括弧に置き換えてから保存する。
+_TITLE_BRACKETS = str.maketrans({'[': '(', ']': ')'})
+
+
 def _normalize_title(title):
-    """Scrapboxのタイトルは改行を含められないため、空白類を1スペースに畳む"""
-    return re.sub(r'\s+', ' ', title).strip()
+    """Scrapboxのタイトルとして使える形に整える。改行を含められないため空白類を
+    1スペースに畳み、使えない [ ] は丸括弧に置き換える。"""
+    return re.sub(r'\s+', ' ', title.translate(_TITLE_BRACKETS)).strip()
 
 
 def _extract_og_image(html):
@@ -275,12 +293,53 @@ def _format_status_line(label, result):
     return f'{"✅" if ok else "❌"} {label}: {detail}'
 
 
-def get_existing_pages():
+def get_existing_pages_status():
+    """(一覧が完全に取れたか, ページ一覧) を返す。取得に失敗したときは欠けた一覧で
+    上書きせず、前回取れた一覧をそのまま返す。欠けた一覧を正解として扱うと、
+    次に取得できたときに既存ページが「新しく増えた」ように見えてしまう。"""
     now = time.time()
     if now - _pages_cache['ts'] > PAGES_CACHE_TTL:
-        _pages_cache['pages'] = name_linker.load_existing_pages(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        ok, pages = name_linker.fetch_all_page_titles(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+        # 失敗時もtsは進める（5分間は再取得せず、全ページ取得を叩き続けないため）
         _pages_cache['ts'] = now
-    return _pages_cache['pages']
+        _pages_cache['complete'] = ok
+        if ok:
+            _pages_cache['pages'] = pages
+        else:
+            record_error('pages_cache', 'ページ一覧を完全に取得できませんでした（前回の一覧を使います）')
+    return _pages_cache['complete'], _pages_cache['pages']
+
+
+def get_existing_pages():
+    return get_existing_pages_status()[1]
+
+
+def get_diary_pages():
+    """日記プロジェクトの既存ページ一覧を返す（自動リンク用、TTL付きキャッシュ）。
+    DMを送るたびに全ページを取りに行くと追記が目に見えて遅くなるため、共有プロジェクト側と
+    同じくキャッシュする。新しく作ったページが最大 PAGES_CACHE_TTL 秒リンクされないのは許容。"""
+    now = time.time()
+    if now - _diary_pages_cache['ts'] > PAGES_CACHE_TTL:
+        ok, pages = name_linker.fetch_all_page_titles(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
+        _diary_pages_cache['ts'] = now
+        # 欠けた一覧で上書きするとリンクが取りこぼされるので、失敗時は前回の一覧を使う
+        if ok:
+            _diary_pages_cache['pages'] = pages
+    return _diary_pages_cache['pages']
+
+
+def autolink_diary_text(text):
+    """日記本文中の既存ページ名をリンク記法に変換する（同期関数）。
+    リンク化はあくまで付加価値なので、ページ一覧の取得に失敗しても本文は素通しし、
+    追記そのものは必ず成功させる。"""
+    if not DIARY_AUTOLINK or not text:
+        return text
+    try:
+        pages = diary.linkable_page_titles(get_diary_pages())
+        return name_linker.link_known_pages(text, pages)
+    except Exception as e:
+        record_error('diary_autolink', e)
+        return text
 
 
 def get_alias_map():
@@ -539,11 +598,38 @@ def find_new_titles(known_titles, current_titles):
     return [title for title in current_titles if title not in known_titles]
 
 
+def select_notifiable_titles(new_titles):
+    """新規タイトルのうち、実際にチャンネルへ通知するものだけを残す。
+    Bot自身が保存したページと設定用ページは通知しない（自分の投稿の二重通知になるため）。"""
+    notifiable = []
+    for title in new_titles:
+        if title in _recently_saved_titles:
+            _recently_saved_titles.discard(title)
+            continue
+        if title == CREDIT_MAPPING_PAGE or title.startswith('bot設定'):
+            continue
+        notifiable.append(title)
+    return notifiable
+
+
+def build_bulk_new_pages_message(titles):
+    """新規ページが一度に大量に増えたときの、1通にまとめた通知文を組み立てる"""
+    lines = [f'📄 Scrapboxに新しいページが{len(titles)}件増えました']
+    lines += [f'・{title}' for title in titles[:NOTIFY_NEW_PAGES_LIST_MAX]]
+    if len(titles) > NOTIFY_NEW_PAGES_LIST_MAX:
+        lines.append(f'…ほか{len(titles) - NOTIFY_NEW_PAGES_LIST_MAX}件')
+    return '\n'.join(lines)
+
+
 @tasks.loop(minutes=5)
 async def notify_new_pages():
     global _known_page_titles
     try:
-        current_titles = await asyncio.to_thread(get_existing_pages)
+        complete, current_titles = await asyncio.to_thread(get_existing_pages_status)
+        if not complete:
+            # 欠けた一覧を基準にすると、次に取得できたときに既存ページが全部「新規」になる
+            _mark_task_run('新規ページ通知', False, 'ページ一覧を取得できず今回は比較を見送り')
+            return
         if _known_page_titles is None:
             _known_page_titles = set(current_titles)
             _mark_task_run('新規ページ通知', True, '初回ベースライン記録')
@@ -551,17 +637,18 @@ async def notify_new_pages():
 
         new_titles = find_new_titles(_known_page_titles, current_titles)
         _known_page_titles = set(current_titles)
-        if not new_titles:
+        notifiable = select_notifiable_titles(new_titles)
+        if not notifiable:
             _mark_task_run('新規ページ通知', True)
             return
 
         channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
-        for title in new_titles:
-            if title in _recently_saved_titles:
-                _recently_saved_titles.discard(title)
-                continue
-            if title == CREDIT_MAPPING_PAGE or title.startswith('bot設定'):
-                continue
+        if len(notifiable) > NOTIFY_NEW_PAGES_MAX:
+            # 一度にこの数を超えるのは一括インポート等の異常時。1件ずつ流すとチャンネルが埋まる
+            await channel.send(build_bulk_new_pages_message(notifiable))
+            _mark_task_run('新規ページ通知', True, f'{len(notifiable)}件をまとめて通知')
+            return
+        for title in notifiable:
             scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
             embed = _build_result_embed(title, scrapbox_url, '', 'Scrapboxに新しいページが投稿されました', discord.Color.gold())
             await channel.send(embed=embed)
@@ -620,13 +707,16 @@ async def create_daily_diary_page_task():
         _mark_task_run('日記ページ作成', False, e)
 
 
-def build_diary_reminder_message(title, project):
+def build_diary_reminder_message(title, project, dt=None):
     """日記の催促DM本文を組み立てる。そのまま返信すれば追記されることを毎回添え、
-    「開いて書く」より軽い手段を提示する。"""
+    「開いて書く」より軽い手段を提示する。あわせてその日のお題を1つ出し、
+    「何を書けばいいか分からない」で止まらないようにする。"""
     url = f'https://scrapbox.io/{project}/{requests.utils.quote(title)}'
+    prompt = diary.prompt_for(dt or datetime.now(JST))
     return (
-        f'📔 {title} の日記がまだ空です。今日はどんな一日でしたか？\n'
-        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。\n'
+        f'📔 {title} の日記がまだ空です。\n'
+        f'今日のお題: {prompt}\n'
+        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。写真もそのまま送れます。\n'
         f'{url}'
     )
 
@@ -786,7 +876,7 @@ class WriteModal(discord.ui.Modal, title='Scrapboxに書き込む'):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        title = self.page_title.value.strip()
+        title = _normalize_title(self.page_title.value)
         body_text = self.body.value or ''
         try:
             status, body = await asyncio.to_thread(write_page_to_scrapbox, title, body_text, interaction.user.display_name)
@@ -1252,9 +1342,45 @@ async def alias_list_command(interaction: discord.Interaction):
     await interaction.followup.send(text)
 
 
+async def upload_diary_images(attachments):
+    """DMに添付された画像をGyazoにアップロードし、Scrapboxに貼れる行のリストを返す。
+    Discordの添付URLは時間が経つと失効するため、そのまま貼らずGyazoの恒久URLに変換する。
+    画像以外の添付は無視する（Scrapboxに貼っても表示できないため）。"""
+    lines = []
+    for attachment in attachments:
+        if not (attachment.content_type or '').startswith('image/'):
+            continue
+        try:
+            data = await attachment.read()
+            url = await asyncio.to_thread(gyazo_uploader.upload_image, data, attachment.filename)
+        except Exception as e:
+            record_error('diary_dm', e)
+            continue
+        if url:
+            lines.append(f'[{url}]')
+        else:
+            record_error('diary_dm', f'{attachment.filename} のGyazoアップロードに失敗しました')
+    return lines
+
+
+def build_diary_entries(text, image_lines):
+    """DM1通を「どの欄に何を書くか」の (section, 本文) リストに変換する。
+    写真は【日記】欄に入れる（その日の記録であって単語ではないため）ので、
+    「単語:」で始まるDMに写真が付いていた場合だけ2件に分かれる。"""
+    section, body = diary.classify_entry(text) if text else ('diary', '')
+    if section == 'vocab':
+        entries = [('vocab', body)] if body else []
+        if image_lines:
+            entries.append(('diary', '\n'.join(image_lines)))
+        return entries
+    combined = '\n'.join(([body] if body else []) + image_lines)
+    return [('diary', combined)] if combined else []
+
+
 async def handle_diary_dm(message):
     """個人のDMで送った内容を、その日の日記ページに自動追記する。先頭が「単語:」の
-    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。
+    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。画像を添付すると
+    Gyazo経由で日記に貼られる（本文なしで写真だけ送ってもよい）。
     DIARY_SCRAPBOX_PROJECT/SID/DIARY_OWNER_USER_ID がすべて設定済みで、かつ送信者が
     本人（DIARY_OWNER_USER_ID）の場合のみ動作する。Karureサーバーの誰でもこのBotに
     DMを送れてしまうため、本人確認は必須（でなければ他人のDMが日記に混入する）。"""
@@ -1263,18 +1389,28 @@ async def handle_diary_dm(message):
     if message.author.id != DIARY_OWNER_USER_ID:
         return
     text = message.content.strip()
-    if not text:
+    if not text and not message.attachments:
         return
-    section, body = diary.classify_entry(text)
 
+    image_lines = await upload_diary_images(message.attachments)
+    entries = build_diary_entries(text, image_lines)
+    if not entries:
+        return
+
+    status, title = None, None
     async with _diary_dm_lock:
-        try:
-            status, title = await asyncio.to_thread(
-                diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
-            )
-        except Exception as e:
-            record_error('diary_dm', e)
-            status, title = None, None
+        for section, body in entries:
+            if section == 'diary':
+                body = await asyncio.to_thread(autolink_diary_text, body)
+            try:
+                status, title = await asyncio.to_thread(
+                    diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
+                )
+            except Exception as e:
+                record_error('diary_dm', e)
+                status, title = None, None
+            if status != 'appended':
+                break
 
     try:
         await message.add_reaction('✅' if status == 'appended' else '❌')
@@ -1396,6 +1532,8 @@ def handle_diary_webhook_request(token, raw_body):
         return 400, {'error': 'text が空です'}
 
     section, body = diary.classify_entry(text)
+    if section == 'diary':
+        body = autolink_diary_text(body)
     status, title = diary.append_diary_entry(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section)
     if status == 'appended':
         return 200, {'status': 'appended', 'title': title, 'section': section}

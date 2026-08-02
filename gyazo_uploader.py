@@ -22,6 +22,26 @@ def check_connection():
     return False, f'ステータス({r.status_code})'
 
 
+def upload_image(data, filename='image.jpg'):
+    """画像のバイト列をGyazoにアップロードし、Gyazo上のURLを返す。失敗時は空文字。
+    Discordの添付ファイルURLは期限切れで見られなくなるため、Scrapboxに貼る画像は
+    必ずこの関数を通して恒久URLに変換してから書き込む。"""
+    if not GYAZO_ACCESS_TOKEN or not data:
+        return ''
+    try:
+        r = requests.post(
+            'https://upload.gyazo.com/api/upload',
+            data={'access_token': GYAZO_ACCESS_TOKEN},
+            files={'imagedata': (filename, data)},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return ''
+        return r.json().get('url', '')
+    except Exception:
+        return ''
+
+
 def upload_thumbnail(image_url):
     """画像URLをダウンロードしてGyazoにアップロードし、Gyazo上のURLを返す。失敗時は空文字。"""
     if not GYAZO_ACCESS_TOKEN or not image_url:
@@ -30,14 +50,6 @@ def upload_thumbnail(image_url):
         img = requests.get(image_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         if img.status_code != 200:
             return ''
-        r = requests.post(
-            'https://upload.gyazo.com/api/upload',
-            data={'access_token': GYAZO_ACCESS_TOKEN},
-            files={'imagedata': ('thumbnail.jpg', img.content)},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return ''
-        return r.json().get('url', '')
     except Exception:
         return ''
+    return upload_image(img.content, 'thumbnail.jpg')

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import bot
@@ -22,6 +23,23 @@ class NormalizeTitleTests(unittest.TestCase):
 
     def test_strips_surrounding_whitespace(self):
         self.assertEqual(bot._normalize_title('  タイトル  '), 'タイトル')
+
+    def test_square_brackets_become_parentheses(self):
+        # Scrapboxはタイトルに [ ] を含められず、そのまま送ると400で弾かれる
+        self.assertEqual(
+            bot._normalize_title('ChouCho - Defy the Silence [Lyric MV]'),
+            'ChouCho - Defy the Silence (Lyric MV)',
+        )
+
+    def test_multiple_and_unbalanced_brackets_are_converted(self):
+        self.assertEqual(
+            bot._normalize_title('【歌ってみた】朔雀 - シンデレラ [DECO*27 Cover] ['),
+            '【歌ってみた】朔雀 - シンデレラ (DECO*27 Cover) (',
+        )
+
+    def test_full_width_brackets_are_kept(self):
+        # 全角の 【 】 はScrapboxでも使えるので触らない
+        self.assertEqual(bot._normalize_title('【MV】タイトル'), '【MV】タイトル')
 
 
 class ExtractOgImageTests(unittest.TestCase):
@@ -297,20 +315,123 @@ class ProcessUrlsTests(unittest.TestCase):
 
 class GetExistingPagesTests(unittest.TestCase):
     def test_cache_is_used_within_ttl(self):
-        fresh_cache = {'pages': ['既存ページ'], 'ts': bot.time.time()}
+        fresh_cache = {'pages': ['既存ページ'], 'ts': bot.time.time(), 'complete': True}
         with patch.object(bot, '_pages_cache', fresh_cache):
-            with patch('bot.name_linker.load_existing_pages') as mock_load:
+            with patch('bot.name_linker.fetch_all_page_titles') as mock_load:
                 result = bot.get_existing_pages()
         mock_load.assert_not_called()
         self.assertEqual(result, ['既存ページ'])
 
     def test_cache_refreshes_after_ttl_expires(self):
-        stale_cache = {'pages': ['古いページ'], 'ts': 0.0}
+        stale_cache = {'pages': ['古いページ'], 'ts': 0.0, 'complete': True}
         with patch.object(bot, '_pages_cache', stale_cache):
-            with patch('bot.name_linker.load_existing_pages', return_value=['新しいページ']) as mock_load:
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(True, ['新しいページ'])) as mock_load:
                 result = bot.get_existing_pages()
         mock_load.assert_called_once()
         self.assertEqual(result, ['新しいページ'])
+
+    def test_incomplete_fetch_keeps_the_previous_list(self):
+        # 欠けた一覧で上書きすると、次に取得できたときに既存ページが全部「新規」になる
+        stale_cache = {'pages': ['ページA', 'ページB'], 'ts': 0.0, 'complete': True}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(False, ['ページA'])):
+                complete, pages = bot.get_existing_pages_status()
+        self.assertFalse(complete)
+        self.assertEqual(pages, ['ページA', 'ページB'])
+
+    def test_incomplete_fetch_still_advances_the_cache_timestamp(self):
+        # 失敗のたびに全ページ取得を叩き直さない
+        stale_cache = {'pages': [], 'ts': 0.0, 'complete': True}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(False, [])) as mock_load:
+                bot.get_existing_pages_status()
+                bot.get_existing_pages_status()
+        mock_load.assert_called_once()
+
+    def test_successful_fetch_is_reported_as_complete(self):
+        stale_cache = {'pages': [], 'ts': 0.0, 'complete': False}
+        with patch.object(bot, '_pages_cache', stale_cache):
+            with patch('bot.name_linker.fetch_all_page_titles', return_value=(True, ['ページA'])):
+                complete, pages = bot.get_existing_pages_status()
+        self.assertTrue(complete)
+        self.assertEqual(pages, ['ページA'])
+
+
+class SelectNotifiableTitlesTests(unittest.TestCase):
+    def test_bot_saved_titles_are_skipped_once(self):
+        with patch.object(bot, '_recently_saved_titles', {'自分で保存した記事'}):
+            self.assertEqual(bot.select_notifiable_titles(['自分で保存した記事', '他人の記事']), ['他人の記事'])
+
+    def test_config_pages_are_skipped(self):
+        with patch.object(bot, 'CREDIT_MAPPING_PAGE', '表記ゆれ'), \
+                patch.object(bot, '_recently_saved_titles', set()):
+            titles = bot.select_notifiable_titles(['表記ゆれ', 'bot設定/監査ログ/2026-07', '記事'])
+        self.assertEqual(titles, ['記事'])
+
+
+class BuildBulkNewPagesMessageTests(unittest.TestCase):
+    def test_message_states_the_total_and_lists_titles(self):
+        message = bot.build_bulk_new_pages_message(['A', 'B', 'C'])
+        self.assertIn('3件', message)
+        self.assertIn('・A', message)
+        self.assertIn('・C', message)
+
+    def test_long_lists_are_truncated(self):
+        titles = [f'記事{i}' for i in range(30)]
+        message = bot.build_bulk_new_pages_message(titles)
+        self.assertIn('30件', message)
+        self.assertIn(f'…ほか{30 - bot.NOTIFY_NEW_PAGES_LIST_MAX}件', message)
+        self.assertNotIn('記事29', message)
+
+
+class NotifyNewPagesTests(unittest.TestCase):
+    def setUp(self):
+        patch.object(bot, '_known_page_titles', None).start()
+        patch.object(bot, '_recently_saved_titles', set()).start()
+        self.channel = MagicMock()
+        self.channel.send = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_channel.return_value = self.channel
+        patch.object(bot, 'client', fake_client).start()
+        self.addCleanup(patch.stopall)
+
+    def _run(self):
+        asyncio.run(bot.notify_new_pages.coro())
+
+    def test_incomplete_page_list_is_not_used_as_a_baseline(self):
+        # ここでベースラインを作ると、次に全件取れたときに既存ページを全部通知してしまう
+        with patch.object(bot, 'get_existing_pages_status', return_value=(False, ['記事A'])):
+            self._run()
+        self.assertIsNone(bot._known_page_titles)
+        self.channel.send.assert_not_awaited()
+        self.assertFalse(bot._task_last_runs['新規ページ通知']['ok'])
+
+    def test_first_complete_run_only_records_the_baseline(self):
+        with patch.object(bot, 'get_existing_pages_status', return_value=(True, ['記事A', '記事B'])):
+            self._run()
+        self.assertEqual(bot._known_page_titles, {'記事A', '記事B'})
+        self.channel.send.assert_not_awaited()
+
+    def test_new_page_is_notified_individually(self):
+        with patch.object(bot, '_known_page_titles', {'記事A'}), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(True, ['記事A', '記事B'])):
+            self._run()
+        self.channel.send.assert_awaited_once()
+        self.assertEqual(self.channel.send.await_args.kwargs['embed'].title, '記事B')
+
+    def test_many_new_pages_are_summarised_in_one_message(self):
+        titles = [f'記事{i}' for i in range(bot.NOTIFY_NEW_PAGES_MAX + 3)]
+        with patch.object(bot, '_known_page_titles', set()), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(True, titles)):
+            self._run()
+        self.channel.send.assert_awaited_once()
+        self.assertIn(f'{len(titles)}件', self.channel.send.await_args.args[0])
+
+    def test_failure_to_fetch_does_not_overwrite_the_baseline(self):
+        with patch.object(bot, '_known_page_titles', {'記事A'}), \
+                patch.object(bot, 'get_existing_pages_status', return_value=(False, [])):
+            self._run()
+            self.assertEqual(bot._known_page_titles, {'記事A'})
 
 
 class FindNewTitlesTests(unittest.TestCase):
@@ -630,6 +751,8 @@ class DiaryWebhookRequestTests(unittest.TestCase):
             patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
             patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
             patch.object(bot, 'DIARY_WEBHOOK_TOKEN', 'secret-token'),
+            # 自動リンクのページ一覧取得でScrapboxに出ていかないようにする
+            patch.object(bot, 'get_diary_pages', return_value=[]),
         ]
         for p in patches:
             p.start()
@@ -677,6 +800,13 @@ class DiaryWebhookRequestTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn('error', payload)
 
+    def test_known_page_names_are_linked(self):
+        body = json.dumps({'text': 'Blenderを触った'}).encode('utf-8')
+        with patch.object(bot, 'get_diary_pages', return_value=['Blender']), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')) as mock_append:
+            bot.handle_diary_webhook_request('secret-token', body)
+        mock_append.assert_called_once_with('diary-proj', 'sid', '[Blender]を触った', 'diary')
+
 
 class EnvHourTests(unittest.TestCase):
     def test_reads_valid_hour(self):
@@ -707,6 +837,244 @@ class DiaryReminderMessageTests(unittest.TestCase):
         message = bot.build_diary_reminder_message('2026-07-06', 'my-diary')
         self.assertIn('返信', message)
         self.assertIn('単語:', message)
+
+    def test_message_includes_the_prompt_of_the_day(self):
+        # 「何を書けばいいか分からない」で止まらないよう、具体的なお題を1つ出す
+        dt = datetime(2026, 7, 6)
+        message = bot.build_diary_reminder_message('2026-07-06', 'my-diary', dt=dt)
+        self.assertIn(bot.diary.prompt_for(dt), message)
+
+    def test_prompt_changes_with_the_date(self):
+        first = bot.build_diary_reminder_message('2026-07-06', 'my-diary', dt=datetime(2026, 7, 6))
+        second = bot.build_diary_reminder_message('2026-07-07', 'my-diary', dt=datetime(2026, 7, 7))
+        self.assertNotEqual(first, second)
+
+
+class GetDiaryPagesTests(unittest.TestCase):
+    def setUp(self):
+        bot._diary_pages_cache['pages'] = []
+        bot._diary_pages_cache['ts'] = 0.0
+        self.addCleanup(lambda: bot._diary_pages_cache.update({'pages': [], 'ts': 0.0}))
+
+    def test_second_call_uses_cache(self):
+        # DMのたびに全ページを取りに行くと追記が目に見えて遅くなる
+        with patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'), \
+                patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'), \
+                patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])) as mock_load:
+            first = bot.get_diary_pages()
+            second = bot.get_diary_pages()
+        self.assertEqual(first, ['Blender'])
+        self.assertEqual(second, ['Blender'])
+        mock_load.assert_called_once_with('diary-proj', 'sid')
+
+    def test_expired_cache_is_reloaded(self):
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])) as mock_load:
+            bot.get_diary_pages()
+            bot._diary_pages_cache['ts'] -= bot.PAGES_CACHE_TTL + 1
+            bot.get_diary_pages()
+        self.assertEqual(mock_load.call_count, 2)
+
+    def test_incomplete_fetch_keeps_the_previous_list(self):
+        # 欠けた一覧で上書きすると、リンクできるはずの単語が5分間リンクされなくなる
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(True, ['Blender'])):
+            bot.get_diary_pages()
+        bot._diary_pages_cache['ts'] -= bot.PAGES_CACHE_TTL + 1
+        with patch.object(bot.name_linker, 'fetch_all_page_titles', return_value=(False, [])):
+            self.assertEqual(bot.get_diary_pages(), ['Blender'])
+
+
+class AutolinkDiaryTextTests(unittest.TestCase):
+    def test_links_known_page_names(self):
+        with patch.object(bot, 'DIARY_AUTOLINK', True), \
+                patch.object(bot, 'get_diary_pages', return_value=['Blender']):
+            self.assertEqual(bot.autolink_diary_text('Blenderを触った'), '[Blender]を触った')
+
+    def test_date_pages_are_not_linked(self):
+        with patch.object(bot, 'DIARY_AUTOLINK', True), \
+                patch.object(bot, 'get_diary_pages', return_value=['2026-07-06']):
+            self.assertEqual(bot.autolink_diary_text('2026-07-06は暑かった'), '2026-07-06は暑かった')
+
+    def test_disabled_returns_text_unchanged_without_fetching(self):
+        with patch.object(bot, 'DIARY_AUTOLINK', False), \
+                patch.object(bot, 'get_diary_pages') as mock_pages:
+            self.assertEqual(bot.autolink_diary_text('Blenderを触った'), 'Blenderを触った')
+        mock_pages.assert_not_called()
+
+    def test_page_list_failure_keeps_the_original_text(self):
+        # リンク化は付加価値なので、失敗しても追記そのものは通す
+        with patch.object(bot, 'DIARY_AUTOLINK', True), \
+                patch.object(bot, 'get_diary_pages', side_effect=Exception('接続できません')), \
+                patch.object(bot, 'record_error') as mock_record:
+            self.assertEqual(bot.autolink_diary_text('Blenderを触った'), 'Blenderを触った')
+        mock_record.assert_called_once()
+
+    def test_empty_text_is_returned_as_is(self):
+        with patch.object(bot, 'get_diary_pages') as mock_pages:
+            self.assertEqual(bot.autolink_diary_text(''), '')
+        mock_pages.assert_not_called()
+
+
+def _fake_attachment(filename='photo.png', content_type='image/png', data=b'bytes'):
+    attachment = MagicMock()
+    attachment.filename = filename
+    attachment.content_type = content_type
+    attachment.read = AsyncMock(return_value=data)
+    return attachment
+
+
+class UploadDiaryImagesTests(unittest.TestCase):
+    def test_image_is_uploaded_to_gyazo_and_returned_as_a_link_line(self):
+        # Discordの添付URLは失効するため、必ずGyazoの恒久URLに変換して貼る
+        attachment = _fake_attachment()
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/a.png') as mock_upload:
+            lines = asyncio.run(bot.upload_diary_images([attachment]))
+        self.assertEqual(lines, ['[https://i.gyazo.com/a.png]'])
+        mock_upload.assert_called_once_with(b'bytes', 'photo.png')
+
+    def test_non_image_attachment_is_skipped(self):
+        attachment = _fake_attachment('memo.pdf', 'application/pdf')
+        with patch.object(bot.gyazo_uploader, 'upload_image') as mock_upload:
+            lines = asyncio.run(bot.upload_diary_images([attachment]))
+        self.assertEqual(lines, [])
+        mock_upload.assert_not_called()
+
+    def test_attachment_without_content_type_is_skipped(self):
+        attachment = _fake_attachment(content_type=None)
+        with patch.object(bot.gyazo_uploader, 'upload_image') as mock_upload:
+            lines = asyncio.run(bot.upload_diary_images([attachment]))
+        self.assertEqual(lines, [])
+        mock_upload.assert_not_called()
+
+    def test_upload_failure_is_recorded_and_skipped(self):
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value=''), \
+                patch.object(bot, 'record_error') as mock_record:
+            lines = asyncio.run(bot.upload_diary_images([_fake_attachment()]))
+        self.assertEqual(lines, [])
+        mock_record.assert_called_once()
+
+    def test_download_exception_does_not_stop_other_images(self):
+        broken = _fake_attachment('broken.png')
+        broken.read = AsyncMock(side_effect=Exception('読めません'))
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/b.png'), \
+                patch.object(bot, 'record_error'):
+            lines = asyncio.run(bot.upload_diary_images([broken, _fake_attachment()]))
+        self.assertEqual(lines, ['[https://i.gyazo.com/b.png]'])
+
+
+class BuildDiaryEntriesTests(unittest.TestCase):
+    def test_text_only(self):
+        self.assertEqual(bot.build_diary_entries('今日は暑い', []), [('diary', '今日は暑い')])
+
+    def test_image_only(self):
+        # 本文なしで写真だけ送っても日記に残る
+        self.assertEqual(bot.build_diary_entries('', ['[url]']), [('diary', '[url]')])
+
+    def test_text_and_image_become_one_entry(self):
+        # キャプション付きの写真は1件のまとまりとして扱う
+        self.assertEqual(bot.build_diary_entries('展示に行った', ['[url]']), [('diary', '展示に行った\n[url]')])
+
+    def test_vocab_prefix_routes_text_to_vocab(self):
+        self.assertEqual(bot.build_diary_entries('単語:serendipity', []), [('vocab', 'serendipity')])
+
+    def test_vocab_with_image_splits_into_two_entries(self):
+        # 写真は単語ではなくその日の記録なので【日記】欄に入れる
+        self.assertEqual(
+            bot.build_diary_entries('単語:serendipity', ['[url]']),
+            [('vocab', 'serendipity'), ('diary', '[url]')],
+        )
+
+    def test_nothing_to_write_returns_no_entries(self):
+        self.assertEqual(bot.build_diary_entries('', []), [])
+
+
+class HandleDiaryDmTests(unittest.TestCase):
+    def setUp(self):
+        patches = [
+            patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
+            patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
+            patch.object(bot, 'DIARY_OWNER_USER_ID', 123),
+            patch.object(bot, 'autolink_diary_text', side_effect=lambda text: text),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _message(self, content='今日は暑い', author_id=123, attachments=()):
+        message = MagicMock()
+        message.content = content
+        message.author.id = author_id
+        message.attachments = list(attachments)
+        message.add_reaction = AsyncMock()
+        return message
+
+    def test_text_dm_is_appended_and_acknowledged(self):
+        message = self._message()
+        with patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')) as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_append.assert_called_once_with('diary-proj', 'sid', '今日は暑い', 'diary')
+        message.add_reaction.assert_awaited_once_with('✅')
+
+    def test_image_only_dm_is_appended(self):
+        message = self._message(content='', attachments=[_fake_attachment()])
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/a.png'), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')) as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_append.assert_called_once_with('diary-proj', 'sid', '[https://i.gyazo.com/a.png]', 'diary')
+        message.add_reaction.assert_awaited_once_with('✅')
+
+    def test_vocab_dm_with_image_appends_twice(self):
+        message = self._message(content='単語:serendipity', attachments=[_fake_attachment()])
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/a.png'), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')) as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        self.assertEqual(mock_append.call_count, 2)
+        self.assertEqual(mock_append.call_args_list[0].args[3], 'vocab')
+        self.assertEqual(mock_append.call_args_list[1].args[3], 'diary')
+
+    def test_diary_text_is_autolinked(self):
+        message = self._message(content='Blenderを触った')
+        with patch.object(bot, 'autolink_diary_text', return_value='[Blender]を触った'), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')) as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_append.assert_called_once_with('diary-proj', 'sid', '[Blender]を触った', 'diary')
+
+    def test_vocab_text_is_not_autolinked(self):
+        # 単語欄は追記時に [ ] で囲まれるため、事前のリンク化は二重になる
+        message = self._message(content='単語:Blender')
+        with patch.object(bot, 'autolink_diary_text') as mock_autolink, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')):
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_autolink.assert_not_called()
+
+    def test_dm_from_someone_else_is_ignored(self):
+        message = self._message(author_id=999)
+        with patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_append.assert_not_called()
+
+    def test_empty_dm_without_attachments_is_ignored(self):
+        message = self._message(content='   ')
+        with patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_append.assert_not_called()
+
+    def test_append_failure_is_marked_with_a_cross(self):
+        message = self._message()
+        with patch.object(bot.diary, 'append_diary_entry', return_value=(500, '2026-07-06')), \
+                patch.object(bot, 'record_error') as mock_record:
+            asyncio.run(bot.handle_diary_dm(message))
+        message.add_reaction.assert_awaited_once_with('❌')
+        mock_record.assert_called_once()
+
+    def test_first_append_failure_stops_the_rest(self):
+        # 単語欄への追記が失敗した状態で写真だけ入ると、成否がリアクションと食い違う
+        message = self._message(content='単語:serendipity', attachments=[_fake_attachment()])
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/a.png'), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=(500, '2026-07-06')) as mock_append, \
+                patch.object(bot, 'record_error'):
+            asyncio.run(bot.handle_diary_dm(message))
+        self.assertEqual(mock_append.call_count, 1)
+        message.add_reaction.assert_awaited_once_with('❌')
 
 
 class DiaryReminderTaskTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 import json
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import diary
@@ -291,6 +291,41 @@ class CheckDiaryWrittenTests(unittest.TestCase):
         with patch('diary.requests.get', return_value=FakeResponse(404)) as mock_get:
             diary.check_diary_written('proj', 'sid')
         self.assertRegex(mock_get.call_args.args[0], r'\d{4}-\d{2}-\d{2}')
+
+
+class PromptForTests(unittest.TestCase):
+    def test_same_day_always_gives_the_same_prompt(self):
+        # 催促が再送されてもお題が変わらないこと（日付から決定的に選んでいること）
+        first = diary.prompt_for(datetime(2026, 7, 6))
+        second = diary.prompt_for(datetime(2026, 7, 6, 23, 59))
+        self.assertEqual(first, second)
+        self.assertIn(first, diary.DIARY_PROMPTS)
+
+    def test_consecutive_days_give_different_prompts(self):
+        prompts = [diary.prompt_for(datetime(2026, 7, day)) for day in range(1, 11)]
+        self.assertEqual(len(set(prompts)), len(diary.DIARY_PROMPTS))
+
+    def test_cycles_through_all_prompts(self):
+        # ローテーションが一巡すること（特定のお題だけ永久に出ない、が無いこと）
+        prompts = {diary.prompt_for(datetime(2026, 7, 1) + timedelta(days=i)) for i in range(30)}
+        self.assertEqual(prompts, set(diary.DIARY_PROMPTS))
+
+
+class LinkablePageTitlesTests(unittest.TestCase):
+    def test_excludes_date_pages(self):
+        # 日記ページ自身をリンク化しても意味が無い
+        self.assertEqual(diary.linkable_page_titles(['2026-07-06', 'serendipity']), ['serendipity'])
+
+    def test_excludes_diary_tag_page(self):
+        # 「日記」は本文に頻出するため、全部リンクになると読めなくなる
+        self.assertEqual(diary.linkable_page_titles(['日記', 'Blender']), ['Blender'])
+
+    def test_excludes_empty_titles(self):
+        self.assertEqual(diary.linkable_page_titles(['', 'Blender']), ['Blender'])
+
+    def test_keeps_pages_that_merely_contain_a_date(self):
+        titles = diary.linkable_page_titles(['2026-07-06の展示'])
+        self.assertEqual(titles, ['2026-07-06の展示'])
 
 
 if __name__ == '__main__':
