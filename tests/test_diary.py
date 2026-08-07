@@ -293,6 +293,80 @@ class CheckDiaryWrittenTests(unittest.TestCase):
         self.assertRegex(mock_get.call_args.args[0], r'\d{4}-\d{2}-\d{2}')
 
 
+class ParsePageEntryTests(unittest.TestCase):
+    def test_title_only(self):
+        self.assertEqual(diary.parse_page_entry('ページ:Blender Guru'), ('Blender Guru', ''))
+
+    def test_full_width_colon_is_accepted(self):
+        self.assertEqual(diary.parse_page_entry('ページ：Blender Guru'), ('Blender Guru', ''))
+
+    def test_body_starts_from_the_second_line(self):
+        title, body = diary.parse_page_entry('ページ:Blender Guru\nチュートリアルが分かりやすい\n続き')
+        self.assertEqual(title, 'Blender Guru')
+        self.assertEqual(body, 'チュートリアルが分かりやすい\n続き')
+
+    def test_plain_text_is_not_a_page_entry(self):
+        self.assertEqual(diary.parse_page_entry('今日は暑い'), (None, '今日は暑い'))
+
+    def test_vocab_entry_is_not_a_page_entry(self):
+        self.assertEqual(diary.parse_page_entry('単語:serendipity'), (None, '単語:serendipity'))
+
+    def test_missing_title_returns_empty_string_not_none(self):
+        # None（該当なし）と '' （ページ名が空）は呼び出し側で区別する必要がある
+        self.assertEqual(diary.parse_page_entry('ページ:'), ('', ''))
+
+
+class CreatePageTests(unittest.TestCase):
+    @staticmethod
+    def _page(lines):
+        return FakeResponse(200, json_data={'persistent': True, 'lines': [{'text': line} for line in lines]})
+
+    def test_new_page_is_created_with_the_body(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                status, title = diary.create_page('proj', 'sid', 'Blender Guru', ['チュートリアル'])
+        self.assertEqual(status, 'created')
+        self.assertEqual(title, 'Blender Guru')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['Blender Guru', 'チュートリアル'])
+
+    def test_existing_page_is_appended_to_not_overwritten(self):
+        # インポートAPIはページ全体を置き換えるため、既存の本文を残さないと消える
+        with patch('diary.requests.get', return_value=self._page(['Blender Guru', '前からある行'])):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                status, title = diary.create_page('proj', 'sid', 'Blender Guru', ['あとから足す行'])
+        self.assertEqual(status, 'appended')
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['Blender Guru', '前からある行', 'あとから足す行'])
+
+    def test_trailing_blank_lines_are_collapsed_before_appending(self):
+        with patch('diary.requests.get', return_value=self._page(['Blender Guru', '本文', '', ''])):
+            with patch('diary.requests.post', return_value=FakeResponse(200)) as mock_post:
+                diary.create_page('proj', 'sid', 'Blender Guru', ['追記'])
+        payload = json.loads(mock_post.call_args.kwargs['files']['import-file'][1])
+        self.assertEqual(payload['pages'][0]['lines'], ['Blender Guru', '本文', '追記'])
+
+    def test_fetch_failure_does_not_write(self):
+        # 既存本文が読めないまま書くと、書いてあった内容を消してしまう
+        with patch('diary.requests.get', side_effect=Exception('network error')):
+            with patch('diary.requests.post') as mock_post:
+                status, title = diary.create_page('proj', 'sid', 'Blender Guru', ['本文'])
+        self.assertIsNone(status)
+        mock_post.assert_not_called()
+
+    def test_write_failure_returns_the_status_code(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', return_value=FakeResponse(500)):
+                status, title = diary.create_page('proj', 'sid', 'Blender Guru', ['本文'])
+        self.assertEqual(status, 500)
+
+    def test_write_exception_returns_none(self):
+        with patch('diary.requests.get', return_value=FakeResponse(404)):
+            with patch('diary.requests.post', side_effect=Exception('network error')):
+                status, title = diary.create_page('proj', 'sid', 'Blender Guru', ['本文'])
+        self.assertIsNone(status)
+
+
 class PromptForTests(unittest.TestCase):
     def test_same_day_always_gives_the_same_prompt(self):
         # 催促が再送されてもお題が変わらないこと（日付から決定的に選んでいること）

@@ -987,6 +987,88 @@ class BuildDiaryEntriesTests(unittest.TestCase):
         self.assertEqual(bot.build_diary_entries('', []), [])
 
 
+class BuildPageBodyLinesTests(unittest.TestCase):
+    def test_body_lines_are_not_indented(self):
+        # 日記への追記と違い、ここはページ本文そのものになる
+        self.assertEqual(bot.build_page_body_lines('一行目\n二行目', []), ['一行目', '二行目'])
+
+    def test_images_follow_the_body(self):
+        self.assertEqual(bot.build_page_body_lines('本文', ['[url]']), ['本文', '[url]'])
+
+    def test_empty_body_with_image_only(self):
+        self.assertEqual(bot.build_page_body_lines('', ['[url]']), ['[url]'])
+
+    def test_trailing_blank_lines_are_dropped(self):
+        self.assertEqual(bot.build_page_body_lines('本文\n\n\n', []), ['本文'])
+
+
+class CreateDiarySidePageTests(unittest.TestCase):
+    def setUp(self):
+        patches = [
+            patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
+            patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
+            patch.object(bot, 'autolink_diary_text', side_effect=lambda text: text),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_page_is_created_and_linked_from_the_diary(self):
+        # リンクを張らないとどこからも辿れないページになる
+        with patch.object(bot.diary, 'create_page', return_value=('created', 'Blender Guru')) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')) as mock_append:
+            status, title = asyncio.run(bot.create_diary_side_page('Blender Guru', '本文', []))
+        self.assertEqual(status, 'created')
+        mock_create.assert_called_once_with('diary-proj', 'sid', 'Blender Guru', ['本文'])
+        mock_append.assert_called_once_with('diary-proj', 'sid', '[Blender Guru]', 'diary')
+
+    def test_brackets_in_the_title_are_normalized(self):
+        # Scrapboxはタイトルに [ ] を含められない
+        with patch.object(bot.diary, 'create_page', return_value=('created', 'x')) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')):
+            asyncio.run(bot.create_diary_side_page('MV [Official]', '', []))
+        self.assertEqual(mock_create.call_args.args[2], 'MV (Official)')
+
+    def test_empty_title_is_rejected_without_writing(self):
+        with patch.object(bot.diary, 'create_page') as mock_create, \
+                patch.object(bot, 'record_error') as mock_record:
+            status, title = asyncio.run(bot.create_diary_side_page('   ', '本文', []))
+        self.assertEqual(status, 'no-title')
+        mock_create.assert_not_called()
+        mock_record.assert_called_once()
+
+    def test_creation_failure_skips_the_diary_link(self):
+        with patch.object(bot.diary, 'create_page', return_value=(500, 'Blender Guru')), \
+                patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            status, title = asyncio.run(bot.create_diary_side_page('Blender Guru', '', []))
+        self.assertEqual(status, 500)
+        mock_append.assert_not_called()
+
+    def test_link_failure_is_reported_as_failure(self):
+        with patch.object(bot.diary, 'create_page', return_value=('created', 'Blender Guru')), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=(500, '2026-07-06')), \
+                patch.object(bot, 'record_error') as mock_record:
+            status, title = asyncio.run(bot.create_diary_side_page('Blender Guru', '', []))
+        self.assertEqual(status, 500)
+        mock_record.assert_called_once()
+
+    def test_page_cache_is_invalidated_so_the_new_page_links(self):
+        bot._diary_pages_cache['ts'] = bot.time.time()
+        self.addCleanup(lambda: bot._diary_pages_cache.update({'pages': [], 'ts': 0.0}))
+        with patch.object(bot.diary, 'create_page', return_value=('created', 'Blender Guru')), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')):
+            asyncio.run(bot.create_diary_side_page('Blender Guru', '', []))
+        self.assertEqual(bot._diary_pages_cache['ts'], 0.0)
+
+    def test_body_is_autolinked(self):
+        with patch.object(bot, 'autolink_diary_text', return_value='[Blender]の話') as mock_autolink, \
+                patch.object(bot.diary, 'create_page', return_value=('created', 'メモ')) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-06')):
+            asyncio.run(bot.create_diary_side_page('メモ', 'Blenderの話', []))
+        mock_autolink.assert_called_once_with('Blenderの話')
+        self.assertEqual(mock_create.call_args.args[3], ['[Blender]の話'])
+
+
 class HandleDiaryDmTests(unittest.TestCase):
     def setUp(self):
         patches = [
@@ -1057,6 +1139,33 @@ class HandleDiaryDmTests(unittest.TestCase):
         with patch.object(bot.diary, 'append_diary_entry') as mock_append:
             asyncio.run(bot.handle_diary_dm(message))
         mock_append.assert_not_called()
+
+    def test_page_prefix_creates_a_page_instead_of_appending(self):
+        message = self._message(content='ページ:Blender Guru\nチュートリアルが分かりやすい')
+        with patch.object(bot, 'create_diary_side_page', new_callable=AsyncMock) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            mock_create.return_value = ('created', 'Blender Guru')
+            asyncio.run(bot.handle_diary_dm(message))
+        mock_create.assert_awaited_once_with('Blender Guru', 'チュートリアルが分かりやすい', [])
+        mock_append.assert_not_called()
+        message.add_reaction.assert_awaited_once_with('✅')
+
+    def test_page_prefix_carries_attached_images(self):
+        message = self._message(content='ページ:展示メモ', attachments=[_fake_attachment()])
+        with patch.object(bot.gyazo_uploader, 'upload_image', return_value='https://i.gyazo.com/a.png'), \
+                patch.object(bot, 'create_diary_side_page', new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = ('created', '展示メモ')
+            asyncio.run(bot.handle_diary_dm(message))
+        self.assertEqual(mock_create.await_args.args[2], ['[https://i.gyazo.com/a.png]'])
+
+    def test_page_creation_failure_is_marked_with_a_cross(self):
+        message = self._message(content='ページ:Blender Guru')
+        with patch.object(bot, 'create_diary_side_page', new_callable=AsyncMock) as mock_create, \
+                patch.object(bot, 'record_error') as mock_record:
+            mock_create.return_value = (500, 'Blender Guru')
+            asyncio.run(bot.handle_diary_dm(message))
+        message.add_reaction.assert_awaited_once_with('❌')
+        mock_record.assert_called_once()
 
     def test_append_failure_is_marked_with_a_cross(self):
         message = self._message()
