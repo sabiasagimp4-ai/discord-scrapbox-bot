@@ -20,6 +20,10 @@ DIARY_TAG = '#日記'
 # 【日記】ではなく VOCAB_HEADING（見出しの直前）に挿入する。
 VOCAB_TRIGGER_PREFIXES = ('単語:', '単語：')
 
+# DM本文がこの接頭辞で始まる場合、その日の日記ではなく
+# 1行目をタイトルとした独立したページを作る（2行目以降が本文）。
+PAGE_TRIGGER_PREFIXES = ('ページ:', 'ページ：')
+
 # 日付そのものがタイトルの日記ページ。本文中に出てきても自動リンク化しない。
 DATE_TITLE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
@@ -102,20 +106,11 @@ def linkable_page_titles(pages):
     ]
 
 
-def create_diary_page(project, sid, dt=None):
-    """指定日（省略時は現在時刻・JST）の日記ページを雛形付きで作成する。
-    既に存在する場合は上書きせずスキップする（同日中の再実行での重複作成を防ぐ）。
-    戻り値: (status, title)
-      status: 'created' / 'exists' / int（HTTPステータス、失敗時） / None（通信失敗）
-    """
-    dt = dt or datetime.now(JST)
-    title = diary_title_for(dt)
-
-    if name_linker.check_page_exists(project, sid, title):
-        return 'exists', title
-
-    lines = [title] + build_template(dt)
-    payload = json.dumps({'pages': [{'title': title, 'lines': lines}]})
+def _import_page(project, sid, title, body_lines):
+    """インポートAPIでページ全体を書き込む。渡した行がページの全内容になる
+    （＝既存ページに使うと消える）ので、追記の場合は取得済みの本文を含めて渡すこと。
+    戻り値: HTTPステータス / None（通信失敗）"""
+    payload = json.dumps({'pages': [{'title': title, 'lines': [title] + body_lines}]})
     try:
         r = requests.post(
             f'https://scrapbox.io/api/page-data/import/{project}.json',
@@ -128,10 +123,59 @@ def create_diary_page(project, sid, dt=None):
             timeout=10,
         )
     except Exception:
+        return None
+    return r.status_code
+
+
+def create_diary_page(project, sid, dt=None):
+    """指定日（省略時は現在時刻・JST）の日記ページを雛形付きで作成する。
+    既に存在する場合は上書きせずスキップする（同日中の再実行での重複作成を防ぐ）。
+    戻り値: (status, title)
+      status: 'created' / 'exists' / int（HTTPステータス、失敗時） / None（通信失敗）
+    """
+    dt = dt or datetime.now(JST)
+    title = diary_title_for(dt)
+
+    if name_linker.check_page_exists(project, sid, title):
+        return 'exists', title
+
+    status = _import_page(project, sid, title, build_template(dt))
+    if status is None:
         return None, title
-    if r.status_code == 200:
-        return 'created', title
-    return r.status_code, title
+    return ('created' if status == 200 else status), title
+
+
+def parse_page_entry(text):
+    """「ページ:タイトル」で始まるDMを (タイトル, 本文) に分解する。
+    1行目の残りがタイトル、2行目以降が本文。該当しない場合は (None, text) を返す。"""
+    for prefix in PAGE_TRIGGER_PREFIXES:
+        if text.startswith(prefix):
+            first_line, _, rest = text.partition('\n')
+            return first_line[len(prefix):].strip(), rest
+    return None, text
+
+
+def create_page(project, sid, title, body_lines):
+    """日記プロジェクトに任意タイトルのページを作る。
+    既存ページがある場合は上書きせず末尾に追記する（インポートAPIは渡した行で
+    ページ全体を置き換えるため、そのまま送ると書いてあった内容が消える）。
+    戻り値: (status, title)
+      status: 'created' / 'appended' / int（HTTPステータス、失敗時） / None（通信失敗）
+    """
+    ok, existing = fetch_body_lines(project, sid, title)
+    if not ok:
+        return None, title
+    created = not existing
+    # 取得結果の末尾に残る空行を詰めてから足す（追記のたびに空行が増えないように）
+    while existing and not existing[-1].strip():
+        existing.pop()
+
+    status = _import_page(project, sid, title, existing + body_lines)
+    if status is None:
+        return None, title
+    if status != 200:
+        return status, title
+    return ('created' if created else 'appended'), title
 
 
 def build_entry_lines(text):
@@ -235,20 +279,7 @@ def append_diary_entry(project, sid, text, section='diary', dt=None):
             body_lines.pop()
         body_lines.extend(entry_lines)
 
-    payload = json.dumps({'pages': [{'title': title, 'lines': [title] + body_lines}]})
-    try:
-        r2 = requests.post(
-            f'https://scrapbox.io/api/page-data/import/{project}.json',
-            files={'import-file': ('pages.json', payload, 'application/json')},
-            headers={
-                'Cookie': f'connect.sid={sid}',
-                'Origin': 'https://scrapbox.io',
-                'Referer': 'https://scrapbox.io',
-            },
-            timeout=10,
-        )
-    except Exception:
+    status = _import_page(project, sid, title, body_lines)
+    if status is None:
         return None, title
-    if r2.status_code == 200:
-        return 'appended', title
-    return r2.status_code, title
+    return ('appended' if status == 200 else status), title

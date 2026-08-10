@@ -153,6 +153,25 @@ tree = discord.app_commands.CommandTree(client)
 _TITLE_BRACKETS = str.maketrans({'[': '(', ']': ')'})
 
 
+async def _fetch_with_retry(get_cached, fetch, ident, attempts=3, base_delay=5):
+    """discord.pyの `get_x(id) or await fetch_x(id)` パターンをラップし、429のうち
+    Cloudflareによる一時ブロック（Discord自身の通常のレート制限とは別物）にだけ、
+    間隔を空けて再試行する。discord.pyはこの手の429を「Cloudflareにブロックされた」と
+    判定すると自動リトライせず即座に例外を送出する仕様（Renderのような共有IPホスティングで
+    頻発する）ため、ここで待って再試行する。バックグラウンドタスクやリアクション処理からの
+    利用を想定しており、数十秒待っても実害が無い場面で使う。"""
+    cached = get_cached(ident)
+    if cached:
+        return cached
+    for attempt in range(attempts):
+        try:
+            return await fetch(ident)
+        except discord.HTTPException as e:
+            if e.status != 429 or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(base_delay * (attempt + 1))
+
+
 def _normalize_title(title):
     """Scrapboxのタイトルとして使える形に整える。改行を含められないため空白類を
     1スペースに畳み、使えない [ ] は丸括弧に置き換える。"""
@@ -582,7 +601,7 @@ async def send_daily_random_article():
         article = await asyncio.to_thread(fetch_random_article)
         if not article:
             return
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         embed = _build_result_embed(
             article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
         )
@@ -642,7 +661,7 @@ async def notify_new_pages():
             _mark_task_run('新規ページ通知', True)
             return
 
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         if len(notifiable) > NOTIFY_NEW_PAGES_MAX:
             # 一度にこの数を超えるのは一括インポート等の異常時。1件ずつ流すとチャンネルが埋まる
             await channel.send(build_bulk_new_pages_message(notifiable))
@@ -683,7 +702,7 @@ async def daily_health_check():
         if not problems:
             _mark_task_run('日次ヘルスチェック', True)
             return
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         await channel.send('⚠️ 日次ヘルスチェックで異常を検出しました\n' + '\n'.join(problems))
         _mark_task_run('日次ヘルスチェック', True, f'異常{len(problems)}件を通知')
     except Exception as e:
@@ -716,13 +735,14 @@ def build_diary_reminder_message(title, project, dt=None):
     return (
         f'📔 {title} の日記がまだ空です。\n'
         f'今日のお題: {prompt}\n'
-        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。写真もそのまま送れます。\n'
+        'このDMに返信すれば【日記】欄に、「単語:〇〇」なら【新しく知った単語】欄に追記されます。'
+        '「ページ:〇〇」で新しいページも作れます。写真もそのまま送れます。\n'
         f'{url}'
     )
 
 
 async def send_diary_reminder_dm(title):
-    user = client.get_user(DIARY_OWNER_USER_ID) or await client.fetch_user(DIARY_OWNER_USER_ID)
+    user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
     await user.send(build_diary_reminder_message(title, DIARY_SCRAPBOX_PROJECT))
 
 
@@ -1363,6 +1383,45 @@ async def upload_diary_images(attachments):
     return lines
 
 
+def build_page_body_lines(body_text, image_lines):
+    """「ページ:」DMの本文を、新規ページに書く行リストに変換する。
+    日記への追記と違いインデントは付けない（そのページの本文そのものになるため）。"""
+    lines = [line.rstrip() for line in body_text.splitlines()] if body_text else []
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines + image_lines
+
+
+async def create_diary_side_page(title, body_text, image_lines):
+    """日記プロジェクトに任意タイトルのページを作り、その日の日記からリンクする。
+    リンクを張らないとどこからも辿れないページになるため、作成と同時に【日記】欄へ
+    [タイトル] を1行追記する（日記が索引として機能する形を保つ）。
+    戻り値: (status, title) — status は diary.create_page と同じ。
+    日記へのリンク追記に失敗した場合はページ自体は残るが、成否は失敗として返す。"""
+    title = _normalize_title(title)
+    if not title:
+        record_error('diary_dm', '「ページ:」に続くページ名が空でした')
+        return 'no-title', ''
+
+    body_text = await asyncio.to_thread(autolink_diary_text, body_text)
+    body_lines = build_page_body_lines(body_text, image_lines)
+    status, title = await asyncio.to_thread(
+        diary.create_page, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, title, body_lines
+    )
+    if status not in ('created', 'appended'):
+        return status, title
+
+    # 作ったばかりのページを本文中の自動リンク対象にするため、一覧を取り直させる
+    _diary_pages_cache['ts'] = 0.0
+    link_status, _ = await asyncio.to_thread(
+        diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, f'[{title}]', 'diary'
+    )
+    if link_status != 'appended':
+        record_error('diary_dm', f'{title} は作成しましたが、日記からのリンク追記に失敗しました（ステータス:{link_status}）')
+        return link_status, title
+    return status, title
+
+
 def build_diary_entries(text, image_lines):
     """DM1通を「どの欄に何を書くか」の (section, 本文) リストに変換する。
     写真は【日記】欄に入れる（その日の記録であって単語ではないため）ので、
@@ -1379,8 +1438,9 @@ def build_diary_entries(text, image_lines):
 
 async def handle_diary_dm(message):
     """個人のDMで送った内容を、その日の日記ページに自動追記する。先頭が「単語:」の
-    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。画像を添付すると
-    Gyazo経由で日記に貼られる（本文なしで写真だけ送ってもよい）。
+    場合は【新しく知った単語】欄、それ以外は【日記】欄に入る。先頭が「ページ:」の
+    場合だけは日記への追記ではなく、1行目をタイトルとした独立ページを作る。
+    画像を添付するとGyazo経由で貼られる（本文なしで写真だけ送ってもよい）。
     DIARY_SCRAPBOX_PROJECT/SID/DIARY_OWNER_USER_ID がすべて設定済みで、かつ送信者が
     本人（DIARY_OWNER_USER_ID）の場合のみ動作する。Karureサーバーの誰でもこのBotに
     DMを送れてしまうため、本人確認は必須（でなければ他人のDMが日記に混入する）。"""
@@ -1393,31 +1453,40 @@ async def handle_diary_dm(message):
         return
 
     image_lines = await upload_diary_images(message.attachments)
-    entries = build_diary_entries(text, image_lines)
-    if not entries:
+    page_title, page_body = diary.parse_page_entry(text)
+    entries = [] if page_title is not None else build_diary_entries(text, image_lines)
+    if page_title is None and not entries:
         return
 
-    status, title = None, None
+    ok, status, title = False, None, None
     async with _diary_dm_lock:
-        for section, body in entries:
-            if section == 'diary':
-                body = await asyncio.to_thread(autolink_diary_text, body)
+        if page_title is not None:
             try:
-                status, title = await asyncio.to_thread(
-                    diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
-                )
+                status, title = await create_diary_side_page(page_title, page_body, image_lines)
             except Exception as e:
                 record_error('diary_dm', e)
-                status, title = None, None
-            if status != 'appended':
-                break
+            ok = status in ('created', 'appended')
+        else:
+            for section, body in entries:
+                if section == 'diary':
+                    body = await asyncio.to_thread(autolink_diary_text, body)
+                try:
+                    status, title = await asyncio.to_thread(
+                        diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
+                    )
+                except Exception as e:
+                    record_error('diary_dm', e)
+                    status, title = None, None
+                ok = status == 'appended'
+                if not ok:
+                    break
 
     try:
-        await message.add_reaction('✅' if status == 'appended' else '❌')
+        await message.add_reaction('✅' if ok else '❌')
     except Exception:
         pass
-    if status != 'appended' and title is not None:
-        record_error('diary_dm', f'{title} への追記失敗（ステータス:{status}）')
+    if not ok and title:
+        record_error('diary_dm', f'{title} への書き込み失敗（ステータス:{status}）')
 
 
 @client.event
@@ -1468,7 +1537,7 @@ async def on_raw_reaction_add(payload):
     if action is None:
         return
     try:
-        channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
     except Exception as e:
         record_error('reaction', f'fetch_message failed: {e}')
