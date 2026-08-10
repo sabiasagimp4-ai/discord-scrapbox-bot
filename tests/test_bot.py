@@ -4,6 +4,8 @@ import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
+
 import bot
 
 
@@ -15,6 +17,56 @@ class FakeResponse:
 
     def json(self):
         return self._json_data
+
+
+def _http_exception(status):
+    # Cloudflareにブロックされた場合、discord.pyは実際にこの形（error code: 0）の
+    # HTTPExceptionを送出する。本番の /status に出ていたエラー文言と同じ形。
+    response = MagicMock()
+    response.status = status
+    response.reason = 'Too Many Requests' if status == 429 else 'Error'
+    return discord.HTTPException(response, 'You are being blocked from accessing our API temporarily due')
+
+
+class FetchWithRetryTests(unittest.TestCase):
+    def test_cached_value_is_returned_without_calling_fetch(self):
+        get_cached = MagicMock(return_value='cached-channel')
+        fetch = AsyncMock()
+        result = asyncio.run(bot._fetch_with_retry(get_cached, fetch, 123))
+        self.assertEqual(result, 'cached-channel')
+        fetch.assert_not_awaited()
+
+    def test_cache_miss_falls_back_to_fetch(self):
+        get_cached = MagicMock(return_value=None)
+        fetch = AsyncMock(return_value='fetched-channel')
+        result = asyncio.run(bot._fetch_with_retry(get_cached, fetch, 123))
+        self.assertEqual(result, 'fetched-channel')
+        fetch.assert_awaited_once_with(123)
+
+    def test_cloudflare_429_is_retried_after_a_delay(self):
+        # discord.pyはこの429を自動リトライしない仕様のため、ここで待って再試行する
+        get_cached = MagicMock(return_value=None)
+        fetch = AsyncMock(side_effect=[_http_exception(429), 'fetched-channel'])
+        with patch.object(bot.asyncio, 'sleep', new_callable=AsyncMock) as mock_sleep:
+            result = asyncio.run(bot._fetch_with_retry(get_cached, fetch, 123, attempts=3, base_delay=5))
+        self.assertEqual(result, 'fetched-channel')
+        mock_sleep.assert_awaited_once_with(5)
+
+    def test_non_429_error_is_not_retried(self):
+        get_cached = MagicMock(return_value=None)
+        fetch = AsyncMock(side_effect=_http_exception(404))
+        with patch.object(bot.asyncio, 'sleep', new_callable=AsyncMock) as mock_sleep:
+            with self.assertRaises(discord.HTTPException):
+                asyncio.run(bot._fetch_with_retry(get_cached, fetch, 123))
+        mock_sleep.assert_not_awaited()
+
+    def test_exhausting_all_attempts_raises(self):
+        get_cached = MagicMock(return_value=None)
+        fetch = AsyncMock(side_effect=_http_exception(429))
+        with patch.object(bot.asyncio, 'sleep', new_callable=AsyncMock):
+            with self.assertRaises(discord.HTTPException):
+                asyncio.run(bot._fetch_with_retry(get_cached, fetch, 123, attempts=2))
+        self.assertEqual(fetch.await_count, 2)
 
 
 class NormalizeTitleTests(unittest.TestCase):

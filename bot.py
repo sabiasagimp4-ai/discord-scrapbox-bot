@@ -153,6 +153,25 @@ tree = discord.app_commands.CommandTree(client)
 _TITLE_BRACKETS = str.maketrans({'[': '(', ']': ')'})
 
 
+async def _fetch_with_retry(get_cached, fetch, ident, attempts=3, base_delay=5):
+    """discord.pyの `get_x(id) or await fetch_x(id)` パターンをラップし、429のうち
+    Cloudflareによる一時ブロック（Discord自身の通常のレート制限とは別物）にだけ、
+    間隔を空けて再試行する。discord.pyはこの手の429を「Cloudflareにブロックされた」と
+    判定すると自動リトライせず即座に例外を送出する仕様（Renderのような共有IPホスティングで
+    頻発する）ため、ここで待って再試行する。バックグラウンドタスクやリアクション処理からの
+    利用を想定しており、数十秒待っても実害が無い場面で使う。"""
+    cached = get_cached(ident)
+    if cached:
+        return cached
+    for attempt in range(attempts):
+        try:
+            return await fetch(ident)
+        except discord.HTTPException as e:
+            if e.status != 429 or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(base_delay * (attempt + 1))
+
+
 def _normalize_title(title):
     """Scrapboxのタイトルとして使える形に整える。改行を含められないため空白類を
     1スペースに畳み、使えない [ ] は丸括弧に置き換える。"""
@@ -582,7 +601,7 @@ async def send_daily_random_article():
         article = await asyncio.to_thread(fetch_random_article)
         if not article:
             return
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         embed = _build_result_embed(
             article['title'], article['scrapbox_url'], article['thumbnail'], article['description'], discord.Color.purple()
         )
@@ -642,7 +661,7 @@ async def notify_new_pages():
             _mark_task_run('新規ページ通知', True)
             return
 
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         if len(notifiable) > NOTIFY_NEW_PAGES_MAX:
             # 一度にこの数を超えるのは一括インポート等の異常時。1件ずつ流すとチャンネルが埋まる
             await channel.send(build_bulk_new_pages_message(notifiable))
@@ -683,7 +702,7 @@ async def daily_health_check():
         if not problems:
             _mark_task_run('日次ヘルスチェック', True)
             return
-        channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, CHANNEL_ID)
         await channel.send('⚠️ 日次ヘルスチェックで異常を検出しました\n' + '\n'.join(problems))
         _mark_task_run('日次ヘルスチェック', True, f'異常{len(problems)}件を通知')
     except Exception as e:
@@ -723,7 +742,7 @@ def build_diary_reminder_message(title, project, dt=None):
 
 
 async def send_diary_reminder_dm(title):
-    user = client.get_user(DIARY_OWNER_USER_ID) or await client.fetch_user(DIARY_OWNER_USER_ID)
+    user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
     await user.send(build_diary_reminder_message(title, DIARY_SCRAPBOX_PROJECT))
 
 
@@ -1518,7 +1537,7 @@ async def on_raw_reaction_add(payload):
     if action is None:
         return
     try:
-        channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
+        channel = await _fetch_with_retry(client.get_channel, client.fetch_channel, payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
     except Exception as e:
         record_error('reaction', f'fetch_message failed: {e}')

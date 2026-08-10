@@ -113,14 +113,23 @@ class CheckConnectionTests(unittest.TestCase):
 
     def test_status_200_returns_ok(self):
         with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
-            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(200)):
+            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(200)) as mock_get:
                 ok, message = gyazo_uploader.check_connection()
         self.assertTrue(ok)
         self.assertEqual(message, '接続OK')
+        # /api/oauth/token/info は現在のGyazo APIに存在せず常に404を返すため使わない
+        self.assertEqual(mock_get.call_args.args[0], 'https://api.gyazo.com/api/images')
+
+    def test_invalid_token_returns_false_with_a_clear_message(self):
+        with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
+            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(401)):
+                ok, message = gyazo_uploader.check_connection()
+        self.assertFalse(ok)
+        self.assertEqual(message, 'アクセストークンが無効です')
 
     def test_other_status_returns_false(self):
         with patch.object(gyazo_uploader, 'GYAZO_ACCESS_TOKEN', 'token'):
-            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(401)):
+            with patch('gyazo_uploader.requests.get', return_value=FakeResponse(500)):
                 ok, message = gyazo_uploader.check_connection()
         self.assertFalse(ok)
 
