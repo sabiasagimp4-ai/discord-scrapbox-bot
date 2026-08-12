@@ -1,12 +1,12 @@
-import { promises as fs, readFileSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
+const { promises: fs, readFileSync, writeFileSync } = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const TRACKING_KEYS = new Set(['app', 'feature', 'si']);
 const DEFAULT_MANIFEST_NAME = 'scrapbox-video-import-manifest.json';
 
-export function canonicalizeUrl(value) {
+function canonicalizeUrl(value) {
   let url;
   try {
     url = new URL(String(value || '').trim());
@@ -39,7 +39,7 @@ export function canonicalizeUrl(value) {
   return url.toString();
 }
 
-export function buildYtDlpArgs(url, outputDir) {
+function buildYtDlpArgs(url, outputDir) {
   const normalized = String(outputDir).replace(/[\\/]$/, '');
   return [
     '--no-playlist',
@@ -60,7 +60,7 @@ function parseManifest(value) {
   }
 }
 
-export class ManifestStore {
+class ManifestStore {
   constructor({ filePath = '', read = null, write = null } = {}) {
     this.filePath = filePath;
     this.read = read || (() => {
@@ -87,7 +87,7 @@ export class ManifestStore {
   }
 }
 
-export class BotClient {
+class BotClient {
   constructor(botUrl, token, fetchImpl = globalThis.fetch) {
     this.botUrl = String(botUrl || '').replace(/\/$/, '');
     this.token = token;
@@ -106,8 +106,12 @@ export class BotClient {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    let payload = {};
-    try { payload = await response.json(); } catch { payload = {}; }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error('Bot APIからJSON形式のレスポンスが返りませんでした。Renderのデプロイ状態を確認してください');
+    }
     if (!response.ok) throw new Error(payload.error || `Bot API error: ${response.status}`);
     return payload;
   }
@@ -155,7 +159,7 @@ async function removeFile(filePath) {
   try { await fs.rm(filePath, { force: true }); } catch { /* cleanup is best effort */ }
 }
 
-export async function processJob(job, { manifest, bot, eagleApi = globalThis.eagle, download = downloadWithYtDlp, tempRoot = os.tmpdir() } = {}) {
+async function processJob(job, { manifest, bot, eagleApi = globalThis.eagle, download = downloadWithYtDlp, tempRoot = os.tmpdir() } = {}) {
   const canonical = canonicalizeUrl(job.canonical_url) || job.canonical_url;
   if (manifest.has(canonical)) {
     return { status: 'succeeded', skipped: true, ...manifest.get(canonical) };
@@ -183,7 +187,7 @@ export async function processJob(job, { manifest, bot, eagleApi = globalThis.eag
   }
 }
 
-export async function processPendingJobs({ bot, manifest, eagleApi = globalThis.eagle, log = () => {} } = {}) {
+async function processPendingJobs({ bot, manifest, eagleApi = globalThis.eagle, log = () => {} } = {}) {
   const { jobs = [] } = await bot.jobs(1);
   const results = [];
   for (const job of jobs) {
@@ -277,6 +281,28 @@ async function startUi() {
   await refresh();
 }
 
+if (typeof module !== 'undefined') {
+  module.exports = {
+    canonicalizeUrl,
+    buildYtDlpArgs,
+    ManifestStore,
+    BotClient,
+    processJob,
+    processPendingJobs,
+  };
+}
+
 if (typeof window !== 'undefined') {
-  window.addEventListener('load', () => { startUi().catch(console.error); });
+  const boot = () => {
+    startUi().catch((error) => {
+      console.error(error);
+      const log = document.getElementById('log');
+      if (log) log.textContent = `初期化失敗: ${error}`;
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
 }

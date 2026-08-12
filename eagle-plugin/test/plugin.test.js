@@ -1,16 +1,27 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const vm = require('node:vm');
 
-import {
+const {
   canonicalizeUrl,
   buildYtDlpArgs,
   ManifestStore,
   BotClient,
   processJob,
-} from '../plugin.js';
+} = require('../plugin.js');
+
+test('plugin can load in Eagle classic-script runtime', () => {
+  assert.equal(typeof canonicalizeUrl, 'function');
+  assert.equal(typeof processJob, 'function');
+});
+
+test('plugin source is valid as a classic script', async () => {
+  const source = await readFile(path.join(__dirname, '..', 'plugin.js'), 'utf8');
+  assert.doesNotThrow(() => new vm.Script(source));
+});
 
 test('canonicalizeUrl removes tracking query parameters', () => {
   assert.equal(
@@ -58,6 +69,19 @@ test('BotClient propagates API error responses', async () => {
   await assert.rejects(
     client.status(),
     /invalid/,
+  );
+});
+
+test('BotClient reports a non-JSON deployment response clearly', async () => {
+  const client = new BotClient('https://bot.example', 'secret', async () => ({
+    ok: true,
+    status: 200,
+    async json() { throw new SyntaxError('Unexpected token o'); },
+  }));
+
+  await assert.rejects(
+    client.status(),
+    /JSON形式のレスポンス/,
   );
 });
 
