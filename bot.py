@@ -702,7 +702,7 @@ def _rss_health_for(feed):
 
 def build_rss_status_lines(now=None):
     """RSSフィードごとの稼働状態を /status 用の行リストにする。"""
-    lines = [f'📡 RSS通知: {len(RSS_FEEDS)}フィード / {_rss_config_errors.__len__()}設定エラー']
+    lines = [f'📡 RSS通知: {len(RSS_FEEDS)}フィード / {len(_rss_config_errors)}設定エラー']
     for feed in RSS_FEEDS:
         health = _rss_health_for(feed)
         state = '一時停止' if health.paused else '有効'

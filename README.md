@@ -219,6 +219,36 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 
 RSSの確認間隔は5分ですが、YouTube側のRSSキャッシュにより通知がさらに遅れる場合があります。また、ライブ開始か通常動画かの状態判定は行わず、RSSに現れたコンテンツを新着として通知します。
 
+### 汎用RSS/Atom通知
+
+`RSS_NOTIFICATION_FEEDS` にJSON配列を設定すると、YouTube以外の公開RSS/Atomフィードも同じ本人DMへ通知できます。未設定時は上記5つのYouTubeフィードを使用します。
+
+```json
+[
+  {
+    "name": "qiita",
+    "url": "https://qiita.com/popular-items/feed",
+    "include": ["Python", "Discord"],
+    "exclude": ["広告"]
+  },
+  {
+    "name": "my-blog",
+    "url": "https://example.com/feed.xml"
+  }
+]
+```
+
+`include` はタイトルにいずれかの語を含む記事だけを対象にし、`exclude` は含まれる記事を除外します。どちらも大文字・小文字を区別せず、空配列または省略時は全件対象です。設定エラーは該当フィードだけを無効化し、`/status` に表示します。
+
+RSS通知の管理には次のコマンドを使えます。`DIARY_OWNER_USER_ID` と一致する本人だけが実行できます。
+
+- `/rss list` — フィードの状態、最終成功時刻、連続失敗回数を表示
+- `/rss pause name:<フィード名>` — 一時停止
+- `/rss resume name:<フィード名>` — 再開
+- `/rss test name:<フィード名>` — 最新記事を本人のDMへテスト送信
+
+通知済みIDと一時停止状態はBotプロセスのメモリ上だけに保持します。再起動すると初回取得が新しい基準になるため、過去記事の永続的な重複防止は行いません。YouTube Data API、Cookie、WebSubはRSS通知には使用しません。
+
 ### 個人の日記ページ自動作成（任意）
 
 `DIARY_SCRAPBOX_PROJECT` と `DIARY_SCRAPBOX_SID` を設定すると、毎日0:05（日本時間）に、その日の日付（`2026-07-06` 形式）をタイトルとしたページを雛形付きで自動作成します。
@@ -455,6 +485,7 @@ Render → Environment から設定します。
 | `SCRAPBOX_PROJECT` | ✅ | ScrapboxのプロジェクトURL名 | `myproject` |
 | `SCRAPBOX_SID` | ✅ | Scrapboxの `connect.sid` Cookie値 | `s%3Axxxxxx...` |
 | `KEYWORD` | — | 絞り込みキーワード（空で全メッセージ対象） | `保存` |
+| `RSS_NOTIFICATION_FEEDS` | — | 汎用RSS/Atom通知のJSON配列。未設定時は既定のYouTube 5チャンネルを使用 | `[{"name":"qiita","url":"https://qiita.com/popular-items/feed"}]` |
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3キー。設定するとYouTubeの説明欄を取得しクレジット抽出が有効になる | `AIza...` |
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
 | `CREDIT_MAPPING_PAGE` | — | 人物名の表記ゆれを管理するScrapboxページ名。`本名 == 別名1, 別名2` の形式で記載した行を参照する | `表記ゆれ` |
