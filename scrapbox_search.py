@@ -113,6 +113,29 @@ def fetch_page_text(project, sid, title, max_chars=1000):
     return body
 
 
+def fetch_page_lines(project, sid, title):
+    """1ページの生の行をタイトルを含めて返す。取得失敗時はNone。"""
+    try:
+        r = requests.get(
+            f'https://scrapbox.io/api/pages/{project}/{requests.utils.quote(title)}',
+            headers={'Cookie': f'connect.sid={sid}'},
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+
+    return [
+        line.get('text', '') if isinstance(line, dict) else str(line)
+        for line in data.get('lines', [])
+    ]
+
+
 def merge_search_results(results_per_query):
     """複数クエリの検索結果をマージして関連度順に並べる。
     入力: [[{title, snippet}, ...], ...]（クエリごとのヒットリスト）

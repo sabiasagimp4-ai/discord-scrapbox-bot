@@ -99,6 +99,18 @@ class FetchPageTextTests(unittest.TestCase):
         self.assertEqual(text, '')
 
 
+class FetchPageLinesTests(unittest.TestCase):
+    def test_preserves_urls_and_title(self):
+        data = {'lines': [{'text': 'タイトル'}, {'text': 'https://youtu.be/x'}]}
+        with patch('scrapbox_search.requests.get', return_value=FakeResponse(data)):
+            lines = scrapbox_search.fetch_page_lines('proj', 'sid', '記事A')
+        self.assertEqual(lines, ['タイトル', 'https://youtu.be/x'])
+
+    def test_returns_none_for_non_200(self):
+        with patch('scrapbox_search.requests.get', return_value=FakeResponse(status_code=404)):
+            self.assertIsNone(scrapbox_search.fetch_page_lines('proj', 'sid', '記事A'))
+
+
 class CleanPageLinesTests(unittest.TestCase):
     def test_unwraps_page_link(self):
         self.assertEqual(scrapbox_search.clean_page_lines(['[山田太郎]が監督']), '山田太郎が監督')
