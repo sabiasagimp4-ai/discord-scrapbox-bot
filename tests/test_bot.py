@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 
 import bot
+from eagle_import import EagleImportStore
 
 
 class FakeResponse:
@@ -1451,6 +1452,9 @@ class RssCommandTests(unittest.TestCase):
         with patch.object(bot, 'DIARY_OWNER_USER_ID', 123):
             self.assertTrue(bot._rss_owner_allowed(owner))
             self.assertFalse(bot._rss_owner_allowed(other))
+
+    def test_unconfigured_owner_is_denied(self):
+        owner = MagicMock(id=123)
         with patch.object(bot, 'DIARY_OWNER_USER_ID', 0):
             self.assertFalse(bot._rss_owner_allowed(owner))
 
@@ -1470,6 +1474,79 @@ class RssCommandTests(unittest.TestCase):
             self.assertTrue(bot.set_rss_paused('qiita', False))
             self.assertFalse(health.paused)
             self.assertFalse(bot.set_rss_paused('missing', True))
+
+
+class EagleImportApiTests(unittest.TestCase):
+    def setUp(self):
+        self.store_patch = patch.object(bot, '_eagle_store', EagleImportStore())
+        self.store = self.store_patch.start()
+        self.token_patch = patch.object(bot, 'EAGLE_BRIDGE_TOKEN', 'test-token')
+        self.token_patch.start()
+        self.addCleanup(self.store_patch.stop)
+        self.addCleanup(self.token_patch.stop)
+
+    def _seed_running_job(self):
+        preview = self.store.create_preview(
+            ['A'], lambda title: [title, 'https://youtu.be/x'], 'https://scrapbox.io/proj'
+        )
+        job = self.store.confirm(preview.preview_id)[0]
+        return self.store.claim(1)[0]
+
+    def test_eagle_jobs_rejects_missing_bridge_token(self):
+        status, payload = bot.handle_eagle_jobs_request('', 1)
+
+        self.assertEqual(status, 401)
+        self.assertIn('error', payload)
+
+    def test_eagle_jobs_claims_pending_job_with_valid_token(self):
+        preview = self.store.create_preview(
+            ['A'], lambda title: [title, 'https://youtu.be/x'], 'https://scrapbox.io/proj'
+        )
+        job = self.store.confirm(preview.preview_id)[0]
+
+        status, payload = bot.handle_eagle_jobs_request('test-token', 1)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['jobs'][0]['job_id'], job.job_id)
+        self.assertEqual(self.store.status()['running'], 1)
+
+    def test_eagle_result_marks_job_succeeded(self):
+        job = self._seed_running_job()
+
+        status, payload = bot.handle_eagle_result_request(
+            'test-token', job.job_id, json.dumps({'status': 'succeeded', 'title': 'Video'}).encode()
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['status'], 'succeeded')
+        self.assertEqual(self.store.status()['succeeded'], 1)
+
+
+class EagleImportCommandTests(unittest.TestCase):
+    def test_owner_guard_accepts_only_configured_user(self):
+        owner = MagicMock(id=123)
+        other = MagicMock(id=456)
+        with patch.object(bot, 'DIARY_OWNER_USER_ID', 123):
+            self.assertTrue(bot._eagle_owner_allowed(owner))
+            self.assertFalse(bot._eagle_owner_allowed(other))
+
+    def test_import_all_without_confirm_only_sends_preview(self):
+        interaction = MagicMock()
+        interaction.user.id = 123
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        store = EagleImportStore()
+        preview = store.create_preview(
+            ['A'], lambda title: [title, 'https://youtu.be/x'], 'https://scrapbox.io/proj'
+        )
+        with patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, '_eagle_store', store), \
+                patch.object(bot, 'create_eagle_preview', return_value=(preview, None)):
+            asyncio.run(bot.eagle_import_all.callback(interaction, confirm=False))
+
+        self.assertEqual(store.status()['pending'], 0)
+        interaction.response.defer.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
 
 
 class ReactionActionTests(unittest.TestCase):

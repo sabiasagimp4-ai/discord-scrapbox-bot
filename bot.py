@@ -12,12 +12,13 @@ from collections import deque
 from datetime import datetime, time as dt_time, timezone, timedelta
 from discord.ext import tasks
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import audit_log
 import channel_links
 import credit_extractor
 import diary
+from eagle_import import EagleImportStore
 import gyazo_uploader
 import name_linker
 import playlist_loader
@@ -55,6 +56,8 @@ DIARY_OWNER_USER_ID = int(os.environ.get('DIARY_OWNER_USER_ID') or '0')
 # iOSショートカット等からのWebhook経由の日記追記用トークン。ヘルスチェックサーバーは
 # インターネットに公開されているため、これが無ければ機能自体を無効化する。
 DIARY_WEBHOOK_TOKEN = os.environ.get('DIARY_WEBHOOK_TOKEN', '')
+# Windows上のEagle Bridgeだけが知る、BotとのジョブAPI認証トークン。
+EAGLE_BRIDGE_TOKEN = os.environ.get('EAGLE_BRIDGE_TOKEN', '').strip()
 
 YOUTUBE_RSS_CHANNELS = (
     ('sana_natori', 'UCIdEIHpS0TdkqRkHL5OkLtA'),
@@ -111,6 +114,8 @@ _recently_saved_titles = set()
 _youtube_tracker = NotificationTracker()
 _rss_tracker = NotificationTracker()
 _rss_health = {feed.name: FeedHealth() for feed in RSS_FEEDS}
+_eagle_store = EagleImportStore()
+_eagle_latest_preview_id = None
 
 RAG_TOP_N = 8
 ASK_COOLDOWN_SECONDS = 30
@@ -183,6 +188,8 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 rss_group = discord.app_commands.Group(name='rss', description='RSS通知を管理します')
 tree.add_command(rss_group)
+eagle_group = discord.app_commands.Group(name='eagle', description='Scrapbox動画をEagleへ取り込みます')
+tree.add_command(eagle_group)
 
 
 # Scrapboxはタイトルに [ ] を含められない（リンク記法と衝突するため400で弾かれる）。
@@ -1027,6 +1034,95 @@ async def status_command(interaction: discord.Interaction):
 
 def _rss_command_denied(interaction):
     return not _rss_owner_allowed(interaction.user)
+
+
+def _eagle_owner_allowed(user):
+    """Eagleへのローカル取り込み操作をBot所有者だけに限定する。"""
+    return bool(DIARY_OWNER_USER_ID) and getattr(user, 'id', 0) == DIARY_OWNER_USER_ID
+
+
+def create_eagle_preview():
+    """Scrapbox全ページを走査して、Eagle取り込みプレビューを作る。"""
+    complete, titles = name_linker.fetch_all_page_titles(SCRAPBOX_PROJECT, SCRAPBOX_SID)
+    if not complete:
+        return None, 'Scrapboxのページ一覧を完全に取得できなかったため中止しました'
+
+    project_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}'
+    preview = _eagle_store.create_preview(
+        titles,
+        lambda title: scrapbox_search.fetch_page_lines(SCRAPBOX_PROJECT, SCRAPBOX_SID, title),
+        project_url,
+    )
+    return preview, None
+
+
+def _eagle_preview_message(preview):
+    return (
+        '🎞️ Eagle取り込みプレビュー\n'
+        f'ページ: {preview.page_count}件\n'
+        f'動画URL（重複排除後）: {preview.video_count}件\n'
+        f'本文取得失敗: {preview.failed_page_count}件\n\n'
+        '実行する場合は `/eagle import-all confirm:True` を実行してください。\n'
+        '公開動画のみが対象です。'
+    )
+
+
+@eagle_group.command(name='import-all', description='Scrapbox全ページの動画をEagleへ取り込みます')
+@discord.app_commands.describe(confirm='プレビュー確認後に実際の取り込みを開始する')
+async def eagle_import_all(interaction: discord.Interaction, confirm: bool = False):
+    global _eagle_latest_preview_id
+    if not _eagle_owner_allowed(interaction.user):
+        await interaction.response.send_message('Eagle取り込みは所有者のみ利用できます', ephemeral=True)
+        return
+
+    if confirm:
+        if not _eagle_latest_preview_id:
+            await interaction.response.send_message(
+                '先に `/eagle import-all` でプレビューを作成してください', ephemeral=True
+            )
+            return
+        jobs = _eagle_store.confirm(_eagle_latest_preview_id)
+        if not jobs:
+            await interaction.response.send_message('取り込み対象の新しい動画URLがありません', ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f'✅ {len(jobs)}件を取り込みキューへ追加しました。Windows側のEagle Bridgeを起動してください。',
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    preview, error = await asyncio.to_thread(create_eagle_preview)
+    if error:
+        await interaction.followup.send(f'❌ {error}', ephemeral=True)
+        return
+    _eagle_latest_preview_id = preview.preview_id
+    await interaction.followup.send(_eagle_preview_message(preview), ephemeral=True)
+
+
+@eagle_group.command(name='status', description='Eagle動画取り込みの状態を表示します')
+async def eagle_status_command(interaction: discord.Interaction):
+    if not _eagle_owner_allowed(interaction.user):
+        await interaction.response.send_message('Eagle取り込みは所有者のみ利用できます', ephemeral=True)
+        return
+    counts = _eagle_store.status()
+    await interaction.response.send_message(
+        '🎞️ Eagle取り込み状態\n'
+        f'待機: {counts["pending"]} / 処理中: {counts["running"]} / '
+        f'成功: {counts["succeeded"]} / 失敗: {counts["failed"]}',
+        ephemeral=True,
+    )
+
+
+@eagle_group.command(name='retry-failed', description='失敗したEagle動画取り込みを再試行します')
+async def eagle_retry_failed_command(interaction: discord.Interaction):
+    if not _eagle_owner_allowed(interaction.user):
+        await interaction.response.send_message('Eagle取り込みは所有者のみ利用できます', ephemeral=True)
+        return
+    retried = _eagle_store.retry_failed()
+    await interaction.response.send_message(
+        f'失敗ジョブを{len(retried)}件、再試行キューへ戻しました。', ephemeral=True
+    )
 
 
 @rss_group.command(name='list', description='RSS通知フィードの設定と状態を表示します')
@@ -1875,8 +1971,89 @@ def handle_diary_webhook_request(token, raw_body):
     return 502, {'error': f'Scrapboxへの書き込みに失敗しました（ステータス:{status}）'}
 
 
+def _eagle_token_valid(token):
+    return bool(EAGLE_BRIDGE_TOKEN) and hmac.compare_digest(token or '', EAGLE_BRIDGE_TOKEN)
+
+
+def handle_eagle_jobs_request(token, limit=1):
+    """Bridge向けに認証済みの取り込みジョブをclaimして返す。"""
+    if not _eagle_token_valid(token):
+        return 401, {'error': 'Eagle Bridge token is invalid'}
+    try:
+        limit = max(1, min(int(limit), 10))
+    except (TypeError, ValueError):
+        limit = 1
+    jobs = _eagle_store.claim(limit)
+    return 200, {'jobs': [job.to_dict() for job in jobs]}
+
+
+def _notify_eagle_progress():
+    if not DIARY_OWNER_USER_ID:
+        return
+    try:
+        loop = client.loop
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(_send_eagle_progress(), loop)
+    except Exception as error:
+        record_error('eagle_progress', error)
+
+
+async def _send_eagle_progress():
+    counts = _eagle_store.status()
+    user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
+    await user.send(
+        '🎞️ Eagle取り込み進捗: '
+        f'待機 {counts["pending"]} / 処理中 {counts["running"]} / '
+        f'成功 {counts["succeeded"]} / 失敗 {counts["failed"]}'
+    )
+
+
+def handle_eagle_result_request(token, job_id, raw_body):
+    """Bridgeの結果報告を認証し、ジョブ状態を冪等に更新する。"""
+    if not _eagle_token_valid(token):
+        return 401, {'error': 'Eagle Bridge token is invalid'}
+    job = _eagle_store.get(job_id)
+    if job is None:
+        return 404, {'error': 'job not found'}
+    try:
+        data = json.loads(raw_body or b'{}')
+    except Exception:
+        return 400, {'error': 'JSONの形式が不正です'}
+    status = data.get('status')
+    if status not in {'succeeded', 'failed'}:
+        return 400, {'error': 'status must be succeeded or failed'}
+
+    if job.status in {'succeeded', 'failed'}:
+        return 200, {'status': job.status, 'idempotent': True}
+    if status == 'succeeded':
+        updated = _eagle_store.complete(job_id, data)
+    else:
+        updated = _eagle_store.fail(job_id, data.get('error') or 'Bridge reported failure')
+    if not updated:
+        return 409, {'error': 'job is not running'}
+    _notify_eagle_progress()
+    return 200, {'status': job.status}
+
+
+def _send_json(handler, status, payload):
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    handler.send_response(status)
+    handler.send_header('Content-Type', 'application/json; charset=utf-8')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/eagle/jobs':
+            raw_limit = parse_qs(parsed.query).get('limit', ['1'])[0]
+            status, payload = handle_eagle_jobs_request(
+                self.headers.get('X-Eagle-Bridge-Token', ''), raw_limit
+            )
+            _send_json(self, status, payload)
+            return
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'ok')
@@ -1886,7 +2063,17 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        if self.path != '/diary':
+        parsed = urlparse(self.path)
+        if parsed.path.startswith('/eagle/jobs/') and parsed.path.endswith('/result'):
+            job_id = unquote(parsed.path[len('/eagle/jobs/'):-len('/result')])
+            length = int(self.headers.get('Content-Length') or 0)
+            raw_body = self.rfile.read(length) if length else b''
+            status, payload = handle_eagle_result_request(
+                self.headers.get('X-Eagle-Bridge-Token', ''), job_id, raw_body
+            )
+            _send_json(self, status, payload)
+            return
+        if parsed.path != '/diary':
             self.send_response(404)
             self.end_headers()
             return
