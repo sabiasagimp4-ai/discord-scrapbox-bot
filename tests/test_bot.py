@@ -1397,6 +1397,81 @@ class YouTubeRssNotificationTests(unittest.TestCase):
         self.assertIn('再送された新着', user.send.await_args.args[0])
 
 
+class GenericRssNotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.user = AsyncMock()
+        self.fake_client = MagicMock()
+        self.fake_client.get_user.return_value = self.user
+        self.old_feed = bot.FeedConfig('feed-a', 'https://example.com/a.xml')
+        self.other_feed = bot.FeedConfig('feed-b', 'https://example.com/b.xml')
+        self.old_item = {
+            'item_id': 'old', 'feed_name': 'feed-a', 'channel_title': 'Feed A',
+            'title': 'old', 'url': 'https://example.com/old',
+        }
+        self.new_item = {**self.old_item, 'item_id': 'new', 'title': 'new'}
+
+    def test_rss_check_notifies_successful_feed_when_another_feed_fails(self):
+        with patch.object(bot, 'client', self.fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, 'RSS_FEEDS', [self.old_feed, self.other_feed]), \
+                patch.object(bot, '_rss_tracker', bot.NotificationTracker()), \
+                patch.object(bot, '_rss_health', {feed.name: bot.FeedHealth() for feed in [self.old_feed, self.other_feed]}), \
+                patch.object(bot, 'fetch_rss_feed', side_effect=[
+                    [self.old_item], RuntimeError('bad'),
+                    [self.old_item, self.new_item], RuntimeError('bad'),
+                ]):
+            asyncio.run(bot.run_rss_check())
+            self.user.send.assert_not_awaited()
+            asyncio.run(bot.run_rss_check())
+        self.user.send.assert_awaited_once()
+        self.assertIn('new', self.user.send.await_args.args[0])
+
+    def test_rss_check_skips_when_owner_is_unset(self):
+        with patch.object(bot, 'DIARY_OWNER_USER_ID', 0), \
+                patch.object(bot, 'fetch_rss_feed') as fetch_feed:
+            asyncio.run(bot.run_rss_check())
+        fetch_feed.assert_not_called()
+
+    def test_rss_status_lines_include_feed_failure_count(self):
+        health = bot.FeedHealth(consecutive_failures=2, last_error='timeout')
+        with patch.object(bot, 'RSS_FEEDS', [self.old_feed]), \
+                patch.object(bot, '_rss_health', {'feed-a': health}):
+            lines = bot.build_rss_status_lines(now=1000)
+        self.assertIn('feed-a', '\n'.join(lines))
+        self.assertIn('失敗2回', '\n'.join(lines))
+        self.assertIn('timeout', '\n'.join(lines))
+
+
+class RssCommandTests(unittest.TestCase):
+    def test_owner_guard_accepts_only_configured_user(self):
+        owner = MagicMock()
+        owner.id = 123
+        other = MagicMock()
+        other.id = 456
+        with patch.object(bot, 'DIARY_OWNER_USER_ID', 123):
+            self.assertTrue(bot._rss_owner_allowed(owner))
+            self.assertFalse(bot._rss_owner_allowed(other))
+        with patch.object(bot, 'DIARY_OWNER_USER_ID', 0):
+            self.assertFalse(bot._rss_owner_allowed(owner))
+
+    def test_find_feed_by_name(self):
+        feed = bot.FeedConfig('qiita', 'https://example.com/feed.xml')
+        with patch.object(bot, 'RSS_FEEDS', [feed]):
+            self.assertIs(bot._find_rss_feed('qiita'), feed)
+            self.assertIsNone(bot._find_rss_feed('missing'))
+
+    def test_pause_and_resume_helpers_change_runtime_state(self):
+        feed = bot.FeedConfig('qiita', 'https://example.com/feed.xml')
+        health = bot.FeedHealth()
+        with patch.object(bot, 'RSS_FEEDS', [feed]), \
+                patch.object(bot, '_rss_health', {'qiita': health}):
+            self.assertTrue(bot.set_rss_paused('qiita', True))
+            self.assertTrue(health.paused)
+            self.assertTrue(bot.set_rss_paused('qiita', False))
+            self.assertFalse(health.paused)
+            self.assertFalse(bot.set_rss_paused('missing', True))
+
+
 class ReactionActionTests(unittest.TestCase):
     def test_save_emojis_map_to_save(self):
         for emoji in bot.SAVE_REACTION_EMOJIS:

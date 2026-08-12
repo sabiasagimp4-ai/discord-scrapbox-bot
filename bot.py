@@ -24,7 +24,16 @@ import playlist_loader
 import rag_qa
 import scrapbox_search
 import ytdlp_extractor
-from youtube_notifications import NotificationTracker, format_notification, parse_feed
+from rss_notifications import (
+    FeedConfig,
+    FeedHealth,
+    NotificationTracker,
+    filter_items,
+    format_notification as format_rss_notification,
+    load_feed_configs,
+    parse_feed as parse_rss_feed,
+)
+from youtube_notifications import format_notification, parse_feed
 
 REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
 
@@ -55,6 +64,20 @@ YOUTUBE_RSS_CHANNELS = (
     ('UC4Kt3OCvmHXhysdW8VU_P6A', 'UC4Kt3OCvmHXhysdW8VU_P6A'),
 )
 YOUTUBE_RSS_URL = 'https://www.youtube.com/feeds/videos.xml?channel_id={}'
+RSS_NOTIFICATION_FEEDS_RAW = os.environ.get('RSS_NOTIFICATION_FEEDS', '')
+
+
+def _default_rss_feeds():
+    return [FeedConfig(
+        name,
+        YOUTUBE_RSS_URL.format(channel_id),
+    ) for name, channel_id in YOUTUBE_RSS_CHANNELS]
+
+
+RSS_FEEDS, _rss_config_errors = load_feed_configs(
+    RSS_NOTIFICATION_FEEDS_RAW,
+    _default_rss_feeds(),
+)
 
 
 def _env_hour(name, default):
@@ -86,6 +109,8 @@ _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
 _youtube_tracker = NotificationTracker()
+_rss_tracker = NotificationTracker()
+_rss_health = {feed.name: FeedHealth() for feed in RSS_FEEDS}
 
 RAG_TOP_N = 8
 ASK_COOLDOWN_SECONDS = 30
@@ -156,6 +181,8 @@ intents.message_content = True
 intents.reactions = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
+rss_group = discord.app_commands.Group(name='rss', description='RSS通知を管理します')
+tree.add_command(rss_group)
 
 
 # Scrapboxはタイトルに [ ] を含められない（リンク記法と衝突するため400で弾かれる）。
@@ -658,6 +685,116 @@ def fetch_youtube_feed(channel_id):
     return parse_feed(response.text)
 
 
+def fetch_rss_feed(config):
+    """指定された公開RSS/Atomフィードを取得して共通項目へ変換する。"""
+    response = requests.get(config.url, timeout=20)
+    response.raise_for_status()
+    return parse_rss_feed(response.text, config.name)
+
+
+def _rss_health_for(feed):
+    health = _rss_health.get(feed.name)
+    if health is None:
+        health = FeedHealth()
+        _rss_health[feed.name] = health
+    return health
+
+
+def build_rss_status_lines(now=None):
+    """RSSフィードごとの稼働状態を /status 用の行リストにする。"""
+    lines = [f'📡 RSS通知: {len(RSS_FEEDS)}フィード / {_rss_config_errors.__len__()}設定エラー']
+    for feed in RSS_FEEDS:
+        health = _rss_health_for(feed)
+        state = '一時停止' if health.paused else '有効'
+        detail = f'{feed.name}: {state}'
+        if health.last_success is not None:
+            at = datetime.fromtimestamp(health.last_success, JST).strftime('%m/%d %H:%M')
+            detail += f' / 最終成功 {at}'
+        else:
+            detail += ' / 最終成功なし'
+        if health.consecutive_failures:
+            detail += f' / 失敗{health.consecutive_failures}回'
+        if health.last_notification_count:
+            detail += f' / 通知{health.last_notification_count}件'
+        if health.last_error:
+            detail += f' / {health.last_error[:80]}'
+        lines.append(f'　{detail}')
+    for error in _rss_config_errors:
+        lines.append(f'　設定エラー: {error[:120]}')
+    return lines
+
+
+def _rss_owner_allowed(user):
+    """RSS通知の管理操作を本人だけに限定する。"""
+    return bool(DIARY_OWNER_USER_ID) and getattr(user, 'id', 0) == DIARY_OWNER_USER_ID
+
+
+def _find_rss_feed(name):
+    return next((feed for feed in RSS_FEEDS if feed.name == name), None)
+
+
+def set_rss_paused(name, paused):
+    feed = _find_rss_feed(name)
+    if feed is None:
+        return False
+    _rss_health_for(feed).paused = paused
+    return True
+
+
+async def run_rss_check():
+    """設定済みのRSS/Atomフィードを巡回し、所有者へ新着をまとめてDMする。"""
+    if not DIARY_OWNER_USER_ID:
+        return
+
+    enabled_feeds = [feed for feed in RSS_FEEDS if not _rss_health_for(feed).paused]
+    if not enabled_feeds:
+        _mark_task_run('RSS通知', True, '全フィード一時停止中')
+        return
+
+    try:
+        results = await asyncio.gather(*(
+            asyncio.to_thread(fetch_rss_feed, feed)
+            for feed in enabled_feeds
+        ), return_exceptions=True)
+        pending = []
+        pending_by_feed = {}
+        for feed, result in zip(enabled_feeds, results):
+            health = _rss_health_for(feed)
+            if isinstance(result, Exception):
+                health.consecutive_failures += 1
+                health.last_error = str(result)[:200]
+                record_error(f'rss:{feed.name}', result)
+                continue
+
+            health.last_success = time.time()
+            health.consecutive_failures = 0
+            health.last_error = ''
+            new_items = _rss_tracker.new_items(result, feed.name)
+            eligible = filter_items(new_items, feed)
+            if eligible:
+                pending.extend(eligible)
+                pending_by_feed[feed.name] = eligible
+
+        if not pending:
+            _mark_task_run('RSS通知', True)
+            return
+
+        user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
+        try:
+            await user.send(format_rss_notification(pending))
+        except Exception:
+            for feed_name, items in pending_by_feed.items():
+                _rss_tracker.forget(items, feed_name)
+            raise
+
+        for feed_name, items in pending_by_feed.items():
+            _rss_health_for(next(feed for feed in RSS_FEEDS if feed.name == feed_name)).last_notification_count = len(items)
+        _mark_task_run('RSS通知', True, f'{len(pending)}件をDM通知')
+    except Exception as error:
+        record_error('rss_notifications', error)
+        _mark_task_run('RSS通知', False, error)
+
+
 async def run_youtube_rss_check():
     """5チャンネルのRSSを取得し、新着を所有者のDMへ送る。"""
     if not DIARY_OWNER_USER_ID:
@@ -701,7 +838,7 @@ async def run_youtube_rss_check():
 
 @tasks.loop(minutes=5)
 async def youtube_rss_notifications():
-    await run_youtube_rss_check()
+    await run_rss_check()
 
 
 @tasks.loop(minutes=5)
@@ -883,8 +1020,70 @@ async def status_command(interaction: discord.Interaction):
         _format_status_line('OpenRouter(AI)', await asyncio.to_thread(credit_extractor.check_connection)),
         _format_status_line('Gyazo', await asyncio.to_thread(gyazo_uploader.check_connection)),
     ]
+    lines.extend(build_rss_status_lines())
     lines.extend(_build_observability_lines())
     await interaction.followup.send('\n'.join(lines))
+
+
+def _rss_command_denied(interaction):
+    return not _rss_owner_allowed(interaction.user)
+
+
+@rss_group.command(name='list', description='RSS通知フィードの設定と状態を表示します')
+async def rss_list_command(interaction: discord.Interaction):
+    if _rss_command_denied(interaction):
+        await interaction.response.send_message('RSS通知は所有者のみ利用できます', ephemeral=True)
+        return
+    await interaction.response.send_message('\n'.join(build_rss_status_lines()), ephemeral=True)
+
+
+@rss_group.command(name='pause', description='RSS通知フィードを一時停止します')
+@discord.app_commands.describe(name='一時停止するフィード名')
+async def rss_pause_command(interaction: discord.Interaction, name: str):
+    if _rss_command_denied(interaction):
+        await interaction.response.send_message('RSS通知は所有者のみ利用できます', ephemeral=True)
+        return
+    if not set_rss_paused(name, True):
+        await interaction.response.send_message(f'フィードが見つかりません: {name}', ephemeral=True)
+        return
+    await interaction.response.send_message(f'RSS通知を一時停止しました: {name}', ephemeral=True)
+
+
+@rss_group.command(name='resume', description='RSS通知フィードを再開します')
+@discord.app_commands.describe(name='再開するフィード名')
+async def rss_resume_command(interaction: discord.Interaction, name: str):
+    if _rss_command_denied(interaction):
+        await interaction.response.send_message('RSS通知は所有者のみ利用できます', ephemeral=True)
+        return
+    if not set_rss_paused(name, False):
+        await interaction.response.send_message(f'フィードが見つかりません: {name}', ephemeral=True)
+        return
+    await interaction.response.send_message(f'RSS通知を再開しました: {name}', ephemeral=True)
+
+
+@rss_group.command(name='test', description='RSS通知を取得して本人のDMへテスト送信します')
+@discord.app_commands.describe(name='テストするフィード名')
+async def rss_test_command(interaction: discord.Interaction, name: str):
+    if _rss_command_denied(interaction):
+        await interaction.response.send_message('RSS通知は所有者のみ利用できます', ephemeral=True)
+        return
+    feed = _find_rss_feed(name)
+    if feed is None:
+        await interaction.response.send_message(f'フィードが見つかりません: {name}', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        items = await asyncio.to_thread(fetch_rss_feed, feed)
+        eligible = filter_items(items, feed)
+        if not eligible:
+            await interaction.followup.send('テスト対象の記事がありません', ephemeral=True)
+            return
+        user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
+        await user.send(format_rss_notification([eligible[0]]))
+        await interaction.followup.send(f'テスト通知をDMへ送信しました: {name}', ephemeral=True)
+    except Exception as error:
+        record_error(f'rss_test:{name}', error)
+        await interaction.followup.send(f'テスト通知に失敗しました: {error}', ephemeral=True)
 
 
 def _build_observability_lines(now=None):
