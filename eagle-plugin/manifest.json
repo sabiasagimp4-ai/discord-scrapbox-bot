@@ -1,0 +1,19 @@
+{
+  "id": "L8SBEAGLESCRAPBOX",
+  "version": "1.0.0",
+  "platform": "win",
+  "arch": "x64",
+  "name": "Scrapbox Video Importer",
+  "keywords": ["Scrapbox", "YouTube", "video", "import"],
+  "devTools": false,
+  "main": {
+    "url": "index.html",
+    "width": 760,
+    "height": 720,
+    "minWidth": 620,
+    "minHeight": 560,
+    "resizable": true,
+    "multiple": false,
+    "runAfterInstall": false
+  }
+}

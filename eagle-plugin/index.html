@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scrapbox Video Importer</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 20px; background: #f5f6f8; color: #202124; }
+    @media (prefers-color-scheme: dark) { body { background: #202124; color: #f1f3f4; } }
+    h1 { margin: 0 0 18px; font-size: 22px; }
+    label { display: block; margin: 12px 0 5px; font-size: 13px; font-weight: 600; }
+    input { box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid #c8cdd3; border-radius: 6px; background: Canvas; color: inherit; }
+    button { margin: 14px 8px 0 0; padding: 9px 13px; border: 0; border-radius: 6px; background: #4b65d1; color: white; cursor: pointer; }
+    button.secondary { background: #69717d; }
+    button:disabled { opacity: .55; cursor: default; }
+    .card { margin-top: 18px; padding: 14px; border-radius: 8px; background: Canvas; box-shadow: 0 1px 4px #0002; }
+    #summary { min-height: 22px; }
+    #sources { max-height: 210px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+    #log { max-height: 150px; overflow: auto; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
+    .muted { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Scrapbox動画をEagleへ取り込み</h1>
+  <label for="bot-url">Bot URL</label>
+  <input id="bot-url" placeholder="https://your-bot.example.com">
+  <label for="token">EAGLE_BRIDGE_TOKEN</label>
+  <input id="token" type="password" placeholder="Renderの環境変数と同じ値">
+  <div>
+    <button id="scan">全ページをスキャン</button>
+    <button id="confirm" disabled>このプレビューを取り込む</button>
+    <button id="start" class="secondary">取り込み開始</button>
+    <button id="refresh" class="secondary">状態更新</button>
+  </div>
+  <section class="card">
+    <strong>プレビュー / 状態</strong>
+    <div id="summary" class="muted">Bot URLとトークンを設定してください。</div>
+    <div id="sources" class="muted"></div>
+  </section>
+  <section class="card">
+    <strong>ログ</strong>
+    <div id="log"></div>
+  </section>
+  <script type="module" src="./plugin.js"></script>
+</body>
+</html>
