@@ -11,6 +11,7 @@ const {
   ManifestStore,
   BotClient,
   processJob,
+  setButtonBusy,
 } = require('../plugin.js');
 
 test('plugin can load in Eagle classic-script runtime', () => {
@@ -102,6 +103,16 @@ test('BotClient preserves the Window context required by fetch', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('setButtonBusy disables a button and restores its label', () => {
+  const button = { disabled: false, textContent: '全ページをスキャン' };
+
+  setButtonBusy(button, true, 'スキャン中…');
+  assert.deepEqual(button, { disabled: true, textContent: 'スキャン中…' });
+
+  setButtonBusy(button, false, '全ページをスキャン');
+  assert.deepEqual(button, { disabled: false, textContent: '全ページをスキャン' });
 });
 
 test('processJob registers metadata, reports all Scrapbox sources, and cleans up the file', async () => {

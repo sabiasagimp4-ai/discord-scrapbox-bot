@@ -219,6 +219,12 @@ function configStore() {
   };
 }
 
+function setButtonBusy(button, busy, label) {
+  if (!button) return;
+  button.disabled = busy;
+  if (label) button.textContent = label;
+}
+
 async function startUi() {
   if (typeof document === 'undefined') return;
   const $ = (id) => document.getElementById(id);
@@ -236,8 +242,15 @@ async function startUi() {
   const manifest = new ManifestStore({ filePath: path.join(os.homedir(), DEFAULT_MANIFEST_NAME) });
   let previewId = null;
   let running = false;
+  let scanRunning = false;
 
   $('scan').onclick = async () => {
+    if (scanRunning) return;
+    scanRunning = true;
+    setButtonBusy($('scan'), true, 'スキャン中…');
+    $('confirm').disabled = true;
+    $('summary').textContent = '全ページをスキャン中…ページ数によって時間がかかります。';
+    log('全ページスキャンを開始しました。完了までこの画面を開いたままにしてください。');
     try {
       const preview = await client().preview();
       previewId = preview.preview_id;
@@ -245,16 +258,26 @@ async function startUi() {
       $('summary').textContent = `ページ ${preview.page_count}件 / 動画 ${preview.video_count}件 / 取得失敗 ${preview.failed_page_count}件`;
       $('sources').textContent = preview.sources.map((source) => `${source.canonical_url}\n  ${source.sources.map((item) => item.page_title).join(', ')}`).join('\n');
       log(`プレビュー作成: ${preview.video_count}件`);
-    } catch (error) { log(`スキャン失敗: ${error}`); }
+    } catch (error) {
+      log(`スキャン失敗: ${error}`);
+    } finally {
+      scanRunning = false;
+      setButtonBusy($('scan'), false, '全ページをスキャン');
+    }
   };
   $('confirm').onclick = async () => {
     if (!previewId) return;
+    setButtonBusy($('confirm'), true, 'キューへ追加中…');
+    log('確認済みプレビューを取り込みキューへ追加しています。');
     try {
       const result = await client().confirm(previewId);
       $('confirm').disabled = true;
       log(`取り込みキューへ ${result.jobs_created}件追加`);
       await refresh();
-    } catch (error) { log(`確認失敗: ${error}`); }
+    } catch (error) {
+      log(`確認失敗: ${error}`);
+      $('confirm').disabled = false;
+    }
   };
   const refresh = async () => {
     try {
@@ -267,17 +290,24 @@ async function startUi() {
   $('start').onclick = async () => {
     if (running) return;
     running = true;
-    $('start').disabled = true;
+    setButtonBusy($('start'), true, '取り込み中…');
+    log('取り込みを開始しました。待機ジョブを確認しています。');
     try {
       const bot = client();
       while (running) {
         const results = await processPendingJobs({ bot, manifest, eagleApi: globalThis.eagle, log });
         await refresh();
-        if (!results.length) break;
+        if (!results.length) {
+          log('待機中のジョブがありません。先にスキャン後、プレビューを確認してください。');
+          break;
+        }
       }
       log('取り込み処理を終了しました');
     } catch (error) { log(`取り込み開始失敗: ${error}`); }
-    finally { running = false; $('start').disabled = false; }
+    finally {
+      running = false;
+      setButtonBusy($('start'), false, '取り込み開始');
+    }
   };
   await refresh();
 }
@@ -290,6 +320,7 @@ if (typeof module !== 'undefined') {
     BotClient,
     processJob,
     processPendingJobs,
+    setButtonBusy,
   };
 }
 
