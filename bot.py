@@ -1987,6 +1987,69 @@ def handle_eagle_jobs_request(token, limit=1):
     return 200, {'jobs': [job.to_dict() for job in jobs]}
 
 
+def _eagle_preview_payload(preview):
+    return {
+        'preview_id': preview.preview_id,
+        'page_count': preview.page_count,
+        'video_count': preview.video_count,
+        'failed_page_count': preview.failed_page_count,
+        'confirmed': preview.confirmed,
+        'sources': [
+            {
+                'canonical_url': source.canonical_url,
+                'sources': [
+                    {
+                        'source_url': occurrence.source_url,
+                        'page_title': occurrence.page_title,
+                        'page_url': occurrence.page_url,
+                        'source_line': occurrence.source_line,
+                    }
+                    for occurrence in source.sources
+                ],
+            }
+            for source in preview.sources
+        ],
+    }
+
+
+def handle_eagle_preview_request(token):
+    """プラグイン向けにScrapbox全ページの動画プレビューを作る。"""
+    global _eagle_latest_preview_id
+    if not _eagle_token_valid(token):
+        return 401, {'error': 'Eagle Bridge token is invalid'}
+    preview, error = create_eagle_preview()
+    if error:
+        return 502, {'error': error}
+    _eagle_latest_preview_id = preview.preview_id
+    return 200, _eagle_preview_payload(preview)
+
+
+def handle_eagle_confirm_request(token, preview_id):
+    """プラグインの確認済みプレビューを取り込みジョブへ変換する。"""
+    if not _eagle_token_valid(token):
+        return 401, {'error': 'Eagle Bridge token is invalid'}
+    if not preview_id:
+        return 400, {'error': 'preview_id is required'}
+    jobs = _eagle_store.confirm(preview_id)
+    if not jobs:
+        return 404, {'error': 'preview not found or already confirmed'}
+    return 200, {
+        'jobs_created': len(jobs),
+        'job_ids': [job.job_id for job in jobs],
+        'counts': _eagle_store.status(),
+    }
+
+
+def handle_eagle_status_request(token):
+    """プラグイン向けに取り込み状況を返す。"""
+    if not _eagle_token_valid(token):
+        return 401, {'error': 'Eagle Bridge token is invalid'}
+    return 200, {
+        'preview_id': _eagle_latest_preview_id,
+        'counts': _eagle_store.status(),
+    }
+
+
 def _notify_eagle_progress():
     if not DIARY_OWNER_USER_ID:
         return
@@ -2047,6 +2110,12 @@ def _send_json(handler, status, payload):
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == '/eagle/status':
+            status, payload = handle_eagle_status_request(
+                self.headers.get('X-Eagle-Bridge-Token', '')
+            )
+            _send_json(self, status, payload)
+            return
         if parsed.path == '/eagle/jobs':
             raw_limit = parse_qs(parsed.query).get('limit', ['1'])[0]
             status, payload = handle_eagle_jobs_request(
@@ -2064,6 +2133,25 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == '/eagle/preview':
+            status, payload = handle_eagle_preview_request(
+                self.headers.get('X-Eagle-Bridge-Token', '')
+            )
+            _send_json(self, status, payload)
+            return
+        if parsed.path == '/eagle/confirm':
+            length = int(self.headers.get('Content-Length') or 0)
+            raw_body = self.rfile.read(length) if length else b''
+            try:
+                data = json.loads(raw_body or b'{}')
+            except Exception:
+                _send_json(self, 400, {'error': 'JSONの形式が不正です'})
+                return
+            status, payload = handle_eagle_confirm_request(
+                self.headers.get('X-Eagle-Bridge-Token', ''), data.get('preview_id')
+            )
+            _send_json(self, status, payload)
+            return
         if parsed.path.startswith('/eagle/jobs/') and parsed.path.endswith('/result'):
             job_id = unquote(parsed.path[len('/eagle/jobs/'):-len('/result')])
             length = int(self.headers.get('Content-Length') or 0)

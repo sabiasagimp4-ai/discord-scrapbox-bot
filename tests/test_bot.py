@@ -1521,6 +1521,41 @@ class EagleImportApiTests(unittest.TestCase):
         self.assertEqual(payload['status'], 'succeeded')
         self.assertEqual(self.store.status()['succeeded'], 1)
 
+    def test_eagle_preview_rejects_missing_bridge_token(self):
+        status, payload = bot.handle_eagle_preview_request('')
+
+        self.assertEqual(status, 401)
+        self.assertIn('error', payload)
+
+    def test_eagle_preview_returns_preview_for_plugin(self):
+        preview = self.store.create_preview(
+            ['A'], lambda title: [title, 'https://youtu.be/x'], 'https://scrapbox.io/proj'
+        )
+        with patch.object(bot, 'create_eagle_preview', return_value=(preview, None)):
+            status, payload = bot.handle_eagle_preview_request('test-token')
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['preview_id'], preview.preview_id)
+        self.assertEqual(payload['video_count'], 1)
+
+    def test_eagle_confirm_creates_jobs_for_plugin(self):
+        preview = self.store.create_preview(
+            ['A'], lambda title: [title, 'https://youtu.be/x'], 'https://scrapbox.io/proj'
+        )
+
+        status, payload = bot.handle_eagle_confirm_request('test-token', preview.preview_id)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['jobs_created'], 1)
+        self.assertEqual(self.store.status()['pending'], 1)
+
+    def test_eagle_status_returns_counts_for_plugin(self):
+        status, payload = bot.handle_eagle_status_request('test-token')
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['counts']['pending'], 0)
+        self.assertIn('preview_id', payload)
+
 
 class EagleImportCommandTests(unittest.TestCase):
     def test_owner_guard_accepts_only_configured_user(self):
