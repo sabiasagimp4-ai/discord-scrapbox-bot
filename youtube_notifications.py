@@ -48,6 +48,11 @@ class NotificationTracker:
         self._seen_ids.update(current_ids)
         return new_items
 
+    def forget(self, items):
+        """Remove items whose notification failed so the next poll can retry."""
+        if self._seen_ids is not None:
+            self._seen_ids.difference_update(item["video_id"] for item in items)
+
 
 def format_notification(items):
     """Build one compact DM for one or more newly observed feed entries."""

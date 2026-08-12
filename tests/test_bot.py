@@ -1305,6 +1305,98 @@ class SendDiaryReminderDmTests(unittest.TestCase):
         user.send.assert_awaited_once()
 
 
+class YouTubeRssNotificationTests(unittest.TestCase):
+    def test_youtube_rss_task_sends_one_dm_for_new_items(self):
+        user = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = user
+        item = {
+            'video_id': 'abc',
+            'channel_title': 'テストチャンネル',
+            'title': '新着',
+            'url': 'https://youtu.be/abc',
+        }
+        newer_item = {
+            **item,
+            'video_id': 'def',
+            'title': '次の新着',
+            'url': 'https://youtu.be/def',
+        }
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, '_youtube_tracker', bot.NotificationTracker()), \
+                patch.object(
+                    bot,
+                    'fetch_youtube_feed',
+                    side_effect=[[item]] * 5 + [[item, newer_item]] * 5,
+                ):
+            asyncio.run(bot.run_youtube_rss_check())
+            user.send.assert_not_called()
+            asyncio.run(bot.run_youtube_rss_check())
+        user.send.assert_awaited_once()
+        self.assertIn('次の新着', user.send.await_args.args[0])
+
+    def test_youtube_rss_task_skips_when_owner_is_unset(self):
+        fake_client = MagicMock()
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 0), \
+                patch.object(bot, 'fetch_youtube_feed') as fetch_feed:
+            asyncio.run(bot.run_youtube_rss_check())
+        fetch_feed.assert_not_called()
+        fake_client.get_user.assert_not_called()
+
+    def test_youtube_rss_task_keeps_tracker_when_feed_fetch_fails(self):
+        user = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = user
+        item = {
+            'video_id': 'abc',
+            'channel_title': 'テストチャンネル',
+            'title': '既存',
+            'url': 'https://youtu.be/abc',
+        }
+        newer_item = {**item, 'video_id': 'def', 'title': '復旧後の新着'}
+        fetch_results = [[item]] * 5
+        fetch_results += [RuntimeError('RSS failure'), [item], [item], [item], [item]]
+        fetch_results += [[item, newer_item]] * 5
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, '_youtube_tracker', bot.NotificationTracker()), \
+                patch.object(bot, 'fetch_youtube_feed', side_effect=fetch_results), \
+                patch.object(bot, 'record_error') as record_error:
+            asyncio.run(bot.run_youtube_rss_check())
+            asyncio.run(bot.run_youtube_rss_check())
+            record_error.assert_called_once()
+            asyncio.run(bot.run_youtube_rss_check())
+        user.send.assert_awaited_once()
+        self.assertIn('復旧後の新着', user.send.await_args.args[0])
+
+    def test_youtube_rss_task_retries_after_dm_failure(self):
+        user = AsyncMock()
+        user.send.side_effect = [RuntimeError('DM failure'), None]
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = user
+        item = {
+            'video_id': 'abc',
+            'channel_title': 'テストチャンネル',
+            'title': '既存',
+            'url': 'https://youtu.be/abc',
+        }
+        newer_item = {**item, 'video_id': 'def', 'title': '再送された新着'}
+        fetch_results = [[item]] * 5 + [[item, newer_item]] * 10
+        with patch.object(bot, 'client', fake_client), \
+                patch.object(bot, 'DIARY_OWNER_USER_ID', 123), \
+                patch.object(bot, '_youtube_tracker', bot.NotificationTracker()), \
+                patch.object(bot, 'fetch_youtube_feed', side_effect=fetch_results), \
+                patch.object(bot, 'record_error') as record_error:
+            asyncio.run(bot.run_youtube_rss_check())
+            asyncio.run(bot.run_youtube_rss_check())
+            record_error.assert_called_once()
+            asyncio.run(bot.run_youtube_rss_check())
+        self.assertEqual(user.send.await_count, 2)
+        self.assertIn('再送された新着', user.send.await_args.args[0])
+
+
 class ReactionActionTests(unittest.TestCase):
     def test_save_emojis_map_to_save(self):
         for emoji in bot.SAVE_REACTION_EMOJIS:

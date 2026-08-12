@@ -24,6 +24,7 @@ import playlist_loader
 import rag_qa
 import scrapbox_search
 import ytdlp_extractor
+from youtube_notifications import NotificationTracker, format_notification, parse_feed
 
 REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBOX_SID')
 
@@ -45,6 +46,15 @@ DIARY_OWNER_USER_ID = int(os.environ.get('DIARY_OWNER_USER_ID') or '0')
 # iOSショートカット等からのWebhook経由の日記追記用トークン。ヘルスチェックサーバーは
 # インターネットに公開されているため、これが無ければ機能自体を無効化する。
 DIARY_WEBHOOK_TOKEN = os.environ.get('DIARY_WEBHOOK_TOKEN', '')
+
+YOUTUBE_RSS_CHANNELS = (
+    ('sana_natori', 'UCIdEIHpS0TdkqRkHL5OkLtA'),
+    ('gerrardon', 'UCRaaCxSF8nEpfG3ZHesXKxw'),
+    ('れてんジャダムの反省', 'UCrEqTsfWfvXpbRnXyiUr2UQ'),
+    ('じゃだれてセンチメンタル', 'UC0qYZ6Z1AXghnEHZ8IEWtLg'),
+    ('UC4Kt3OCvmHXhysdW8VU_P6A', 'UC4Kt3OCvmHXhysdW8VU_P6A'),
+)
+YOUTUBE_RSS_URL = 'https://www.youtube.com/feeds/videos.xml?channel_id={}'
 
 
 def _env_hour(name, default):
@@ -75,6 +85,7 @@ NOTIFY_NEW_PAGES_LIST_MAX = 10
 _alias_map_cache = None
 _known_page_titles = None
 _recently_saved_titles = set()
+_youtube_tracker = NotificationTracker()
 
 RAG_TOP_N = 8
 ASK_COOLDOWN_SECONDS = 30
@@ -640,6 +651,59 @@ def build_bulk_new_pages_message(titles):
     return '\n'.join(lines)
 
 
+def fetch_youtube_feed(channel_id):
+    """指定チャンネルの公開Atomフィードを取得して項目へ変換する。"""
+    response = requests.get(YOUTUBE_RSS_URL.format(channel_id), timeout=20)
+    response.raise_for_status()
+    return parse_feed(response.text)
+
+
+async def run_youtube_rss_check():
+    """5チャンネルのRSSを取得し、新着を所有者のDMへ送る。"""
+    if not DIARY_OWNER_USER_ID:
+        return
+
+    try:
+        results = await asyncio.gather(*(
+            asyncio.to_thread(fetch_youtube_feed, channel_id)
+            for _, channel_id in YOUTUBE_RSS_CHANNELS
+        ), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            error = failures[0]
+            record_error('youtube_rss_notifications', error)
+            _mark_task_run('YouTube RSS通知', False, error)
+            return
+
+        items = []
+        for (display_name, _), feed_items in zip(YOUTUBE_RSS_CHANNELS, results):
+            for item in feed_items:
+                if not item.get('channel_title') or item['channel_title'] == 'YouTube':
+                    item = {**item, 'channel_title': display_name}
+                items.append(item)
+
+        new_items = _youtube_tracker.new_items(items)
+        if not new_items:
+            _mark_task_run('YouTube RSS通知', True)
+            return
+
+        user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
+        try:
+            await user.send(format_notification(new_items))
+        except Exception:
+            _youtube_tracker.forget(new_items)
+            raise
+        _mark_task_run('YouTube RSS通知', True, f'{len(new_items)}件をDM通知')
+    except Exception as e:
+        record_error('youtube_rss_notifications', e)
+        _mark_task_run('YouTube RSS通知', False, e)
+
+
+@tasks.loop(minutes=5)
+async def youtube_rss_notifications():
+    await run_youtube_rss_check()
+
+
 @tasks.loop(minutes=5)
 async def notify_new_pages():
     global _known_page_titles
@@ -784,6 +848,8 @@ async def on_ready():
         daily_health_check.start()
     if not notify_new_pages.is_running():
         notify_new_pages.start()
+    if DIARY_OWNER_USER_ID and not youtube_rss_notifications.is_running():
+        youtube_rss_notifications.start()
     if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and not create_daily_diary_page_task.is_running():
         create_daily_diary_page_task.start()
     # 催促DMの宛先が要るため、DM追記と同じく DIARY_OWNER_USER_ID も揃って初めて起動する

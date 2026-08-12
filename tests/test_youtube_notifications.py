@@ -48,6 +48,15 @@ class YouTubeNotificationTests(unittest.TestCase):
         self.assertEqual([item["video_id"] for item in tracker.new_items(newer)], ["next456"])
         self.assertEqual(tracker.new_items(newer), [])
 
+    def test_tracker_can_forget_items_when_notification_fails(self):
+        tracker = NotificationTracker()
+        old = parse_feed(ATOM)
+        tracker.new_items(old)
+        newer = old + [{**old[0], "video_id": "next456", "title": "次の動画"}]
+        pending = tracker.new_items(newer)
+        tracker.forget(pending)
+        self.assertEqual([item["video_id"] for item in tracker.new_items(newer)], ["next456"])
+
     def test_format_notification_groups_multiple_items(self):
         message = format_notification([
             {"channel_title": "A", "title": "動画1", "url": "https://youtu.be/1"},

@@ -205,6 +205,20 @@ BotがScrapboxへ書き込む全操作（URL保存・`/write`・`/note`・`/proj
 - ページ一覧の取得が途中で失敗した場合、**その回は比較を見送ります**。欠けた一覧を「今の全ページ」として基準に採用してしまうと、次に全件取得できたときに既存ページが丸ごと「新しく増えた」ように見えて大量投稿になるためです。取得失敗は `/status` の直近エラーと「新規ページ通知」の実行結果に記録されます
 - それでも1回の巡回で新規ページが5件を超えた場合は、1件ずつのEmbedではなく**タイトル一覧を1通にまとめて**送ります（一括インポート等でチャンネルが埋まるのを防ぐため）
 
+### YouTube新着動画のDM通知
+
+`DIARY_OWNER_USER_ID` が設定されている場合、5分ごとに次の5チャンネルのYouTube Atomフィードを確認し、新しい動画または配信ページを本人のDiscord DMへ送ります。
+
+- [sana_natori](https://www.youtube.com/@sana_natori)
+- [gerrardon](https://www.youtube.com/@gerrardon)
+- [UC4Kt3OCvmHXhysdW8VU_P6A](https://youtube.com/channel/UC4Kt3OCvmHXhysdW8VU_P6A)
+- [れてんジャダムの反省](https://www.youtube.com/@れてんジャダムの反省)
+- [じゃだれてセンチメンタル](https://www.youtube.com/@じゃだれてセンチメンタル/videos)
+
+初回取得は現在のフィードを基準化するだけで、過去動画をまとめて通知しません。同じ動画IDも重複通知しません。YouTube Data APIやCookieはこの通知機能では使用しません。
+
+RSSの確認間隔は5分ですが、YouTube側のRSSキャッシュにより通知がさらに遅れる場合があります。また、ライブ開始か通常動画かの状態判定は行わず、RSSに現れたコンテンツを新着として通知します。
+
 ### 個人の日記ページ自動作成（任意）
 
 `DIARY_SCRAPBOX_PROJECT` と `DIARY_SCRAPBOX_SID` を設定すると、毎日0:05（日本時間）に、その日の日付（`2026-07-06` 形式）をタイトルとしたページを雛形付きで自動作成します。
