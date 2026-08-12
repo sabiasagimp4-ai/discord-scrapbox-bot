@@ -474,6 +474,43 @@ Renderの無料Web Serviceは15分アクセスがないとスリープします�
 
 ---
 
+## Scrapbox動画をEagleへ一括取り込み
+
+Scrapboxプロジェクト内の全ページから動画URLを探し、Windows上のEagleへ動画ファイルとして登録できます。BotはRender上、Eagleは手元のPC上で動くため、リポジトリの`eagle_bridge.py`をWindows側で起動します。EagleのローカルAPIを外部公開する必要はありません。
+
+### 事前準備
+
+1. Windows PCにEagle、Python 3、`ffmpeg`をインストールし、Eagleを起動します。
+2. Renderの環境変数に`EAGLE_BRIDGE_TOKEN`を設定します。十分に長いランダム文字列を使い、ログやDiscordへ貼らないでください。
+3. Windows側で依存関係をインストールします。
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+### Discordからの操作
+
+1. `/eagle import-all`で全ページを走査し、ページ数・動画URL数・失敗ページ数のプレビューを表示します。
+2. 内容を確認してから`/eagle import-all confirm:True`を実行します。確認前にダウンロードは始まりません。
+3. Windows側でBridgeを起動します。
+
+```powershell
+$env:EAGLE_BOT_URL = 'https://あなたのRenderサービス.onrender.com'
+$env:EAGLE_BRIDGE_TOKEN = 'Renderと同じトークン'
+python eagle_bridge.py
+```
+
+4. `/eagle status`で待機・処理中・成功・失敗件数を確認できます。失敗した動画は`/eagle retry-failed`で再試行できます。
+
+Bridgeは動画を一度に1件ずつ処理し、成功した正規化URLを`manifest.json`へ保存します。再実行時はEagleへ登録済みのURLをスキップします。Renderの再起動でクラウド側の未完了キューが失われた場合は、`/eagle import-all`から再実行してください。
+
+### 制限事項
+
+- YouTube Data API、Cookie、ログインセッションは使用しません。
+- 公開動画が対象です。非公開、会員限定、年齢制限、地域制限、ログイン必須の動画は失敗する可能性があります。
+- Eagleが起動していない、ffmpegが見つからない、ディスク容量が足りない場合は個別ジョブが失敗します。
+- 一時ダウンロードファイルはEagle登録後に削除されます。Eagleに登録された動画本体はEagle側で管理されます。
+
 ## 環境変数
 
 Render → Environment から設定します。
@@ -497,6 +534,7 @@ Render → Environment から設定します。
 | `DIARY_REMINDER_HOUR` | `22` | 日記が空のときに催促DMを送る時刻（0〜23の時。分は0固定、日本時間）。0〜23以外や数字以外を入れた場合は既定の22時にフォールバック | `21` |
 | `DIARY_AUTOLINK` | `1` | 日記本文中の既存ページ名を自動でリンク記法 `[ ]` にするか。`0` で無効化 | `0` |
 | `DIARY_WEBHOOK_TOKEN` | — | iOSショートカット等からの日記追記Webhookの認証トークン。十分に長いランダム文字列にすること。未設定時はWebhook機能を無効化 | `a9f3...`（自分で生成したランダム文字列） |
+| `EAGLE_BRIDGE_TOKEN` | — | Windows Eagle BridgeがジョブAPIへ接続するための認証トークン。未設定時はBridge APIを無効化 | `ランダムな長い文字列` |
 
 ### connect.sid の取得方法
 
@@ -525,6 +563,8 @@ discord-scrapbox-bot/
 ├── gyazo_uploader.py            # サムネイル画像のGyazoアップロード
 ├── playlist_loader.py           # YouTube再生リストの動画URL展開
 ├── ytdlp_extractor.py           # Instagram/TikTok等のメタデータ取得（yt-dlp）
+├── eagle_import.py              # Scrapbox動画URL収集と取り込みジョブ管理
+├── eagle_bridge.py               # Windows上の動画ダウンロード・Eagle登録Bridge
 ├── diary.py                     # 個人の日記ページ自動作成（任意機能）
 ├── tests/                       # 単体テスト（unittest）
 ├── .github/workflows/test.yml   # CI（push/PR時に単体テストを自動実行）
