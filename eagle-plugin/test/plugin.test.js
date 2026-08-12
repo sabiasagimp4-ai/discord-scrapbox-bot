@@ -85,6 +85,25 @@ test('BotClient reports a non-JSON deployment response clearly', async () => {
   );
 });
 
+test('BotClient preserves the Window context required by fetch', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async function fetchWithWindowContext() {
+    if (this !== globalThis) throw new TypeError('Illegal invocation');
+    return {
+      ok: true,
+      status: 200,
+      async json() { return { counts: { pending: 0, running: 0, succeeded: 0, failed: 0 } }; },
+    };
+  };
+  try {
+    const client = new BotClient('https://bot.example', 'secret');
+    const status = await client.status();
+    assert.equal(status.counts.pending, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('processJob registers metadata, reports all Scrapbox sources, and cleans up the file', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'eagle-plugin-test-'));
   const manifestWrites = [];

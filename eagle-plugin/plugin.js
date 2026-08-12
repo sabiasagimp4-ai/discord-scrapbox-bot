@@ -88,10 +88,11 @@ class ManifestStore {
 }
 
 class BotClient {
-  constructor(botUrl, token, fetchImpl = globalThis.fetch) {
+  constructor(botUrl, token, fetchImpl = null) {
     this.botUrl = String(botUrl || '').replace(/\/$/, '');
     this.token = token;
-    this.fetchImpl = fetchImpl;
+    const request = fetchImpl || globalThis.fetch;
+    this.fetchImpl = typeof request === 'function' ? request.bind(globalThis) : request;
     if (!this.botUrl || !this.token || typeof this.fetchImpl !== 'function') {
       throw new Error('Bot URL、トークン、fetchが必要です');
     }
