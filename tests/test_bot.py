@@ -1597,5 +1597,56 @@ class ReactionActionTests(unittest.TestCase):
         self.assertIsNone(bot._reaction_action('😀'))
 
 
+def _fake_message(content, channel_id=999):
+    message = MagicMock()
+    message.author.bot = False
+    message.author.display_name = 'ユーザー'
+    message.content = content
+    message.channel = MagicMock(spec=discord.TextChannel)
+    message.channel.id = channel_id
+    message.reply = AsyncMock()
+    return message
+
+
+class OnMessageTests(unittest.TestCase):
+    """監視チャンネルではキーワード無しで、URLを含むメッセージだけが保存される。"""
+
+    def _run(self, message):
+        with patch.object(bot, 'CHANNEL_ID', 999), \
+                patch.object(bot, 'expand_urls', side_effect=lambda urls: urls), \
+                patch.object(bot, 'process_urls', return_value=(['保存しました'], [])) as process:
+            asyncio.run(bot.on_message(message))
+        return process
+
+    def test_url_alone_is_saved_without_any_keyword(self):
+        message = _fake_message('https://youtu.be/xxxxxx')
+        process = self._run(message)
+
+        process.assert_called_once()
+        self.assertEqual(process.call_args.args[0], ['https://youtu.be/xxxxxx'])
+        message.reply.assert_awaited_once()
+
+    def test_url_with_surrounding_chat_is_still_saved(self):
+        message = _fake_message('これ良かった https://youtu.be/xxxxxx')
+        process = self._run(message)
+
+        self.assertEqual(process.call_args.args[0], ['https://youtu.be/xxxxxx'])
+
+    def test_message_without_url_is_ignored_silently(self):
+        # キーワードで絞らない分、URLの無い雑談に返信すると邪魔になるため無反応にする
+        message = _fake_message('おはよう')
+        process = self._run(message)
+
+        process.assert_not_called()
+        message.reply.assert_not_awaited()
+
+    def test_other_channel_is_ignored(self):
+        message = _fake_message('https://youtu.be/xxxxxx', channel_id=111)
+        process = self._run(message)
+
+        process.assert_not_called()
+        message.reply.assert_not_awaited()
+
+
 if __name__ == '__main__':
     unittest.main()

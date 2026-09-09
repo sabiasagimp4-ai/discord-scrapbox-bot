@@ -19,15 +19,17 @@ DiscordとScrapboxをつなぐBot。URLの自動保存・クレジット抽出�
 
 ### 自動保存（メッセージ監視）
 
-1. `CHANNEL_ID` で指定したチャンネルに `{キーワード} {URL}` を含むメッセージを送信
+1. `CHANNEL_ID` で指定したチャンネルに URL を含むメッセージを送信（「保存」などのキーワードは不要）
 2. BotがURLを検出し、タイトルを取得
 3. ScrapboxにページをImport API経由で作成
 4. DiscordにScrapboxページのURLをリプライ（複数URLが含まれる場合は1件ずつではなく1通にまとめて返信。サムネイルがある場合はEmbedで表示）
 
 ```
-[ユーザー] 保存 https://youtu.be/xxxxxx
+[ユーザー] https://youtu.be/xxxxxx
 [Bot]      保存しました https://scrapbox.io/myproject/動画タイトル
 ```
+
+URLを含まないメッセージには何も返しません（雑談に反応しないため）。逆に、このチャンネルに貼ったURLはすべて保存対象になるので、保存したくないURLはこのチャンネル以外に貼ってください。
 
 ### リアクションで保存・質問
 
@@ -35,14 +37,14 @@ DiscordとScrapboxをつなぐBot。URLの自動保存・クレジット抽出�
 
 | リアクション | 動作 |
 |---|---|
-| 📚 / 💾 / 🔖 | そのメッセージ内のURLをScrapboxに保存する（キーワード不要。「後から保存」に便利） |
+| 📚 / 💾 / 🔖 | そのメッセージ内のURLをScrapboxに保存する（監視対象外のチャンネルや「後から保存」に便利） |
 | ❓ / ❔ | そのメッセージの本文を質問とみなして `/ask` 相当の回答を返す（回答スレッドで追い質問も可能） |
 
 古いメッセージのリアクションにも反応します。❓での質問は `OPENROUTER_API_KEY` が必要で、リアクションした人ごとに30秒のクールダウンが適用されます。
 
 ### `/save` スラッシュコマンド
 
-どのチャンネルでも `/save url:https://youtu.be/xxxxxx` を実行すると、キーワード不要で同じ保存処理が走ります。実行者名とURLに続けて、タイトル・サムネイル・Scrapboxページへのリンクを含むEmbedが返信されます。
+どのチャンネルでも `/save url:https://youtu.be/xxxxxx` を実行すると、同じ保存処理が走ります。実行者名とURLに続けて、タイトル・サムネイル・Scrapboxページへのリンクを含むEmbedが返信されます。
 
 `overwrite:true` を指定すると、同タイトルのページが既に存在していても上書き保存します（通常は既存ページがあれば新規作成をスキップします）。
 
@@ -519,7 +521,6 @@ Render → Environment から設定します。
 | `CHANNEL_ID` | ✅ | 監視するチャンネルのID（数字） | `1234567890123456789` |
 | `SCRAPBOX_PROJECT` | ✅ | ScrapboxのプロジェクトURL名 | `myproject` |
 | `SCRAPBOX_SID` | ✅ | Scrapboxの `connect.sid` Cookie値 | `s%3Axxxxxx...` |
-| `KEYWORD` | — | 絞り込みキーワード（空で全メッセージ対象） | `保存` |
 | `RSS_NOTIFICATION_FEEDS` | — | 汎用RSS/Atom通知のJSON配列。未設定時は既定のYouTube 5チャンネルを使用 | `[{"name":"qiita","url":"https://qiita.com/popular-items/feed"}]` |
 | `YOUTUBE_API_KEY` | — | YouTube Data API v3キー。設定するとYouTubeの説明欄を取得しクレジット抽出が有効になる | `AIza...` |
 | `OPENROUTER_API_KEY` | — | クレジット抽出用LLM（OpenRouter）のAPIキー。未設定時はクレジット抽出をスキップ | `sk-or-...` |
@@ -600,7 +601,6 @@ export DISCORD_TOKEN=...
 export CHANNEL_ID=...
 export SCRAPBOX_PROJECT=...
 export SCRAPBOX_SID=...
-export KEYWORD=保存
 
 python bot.py
 ```
