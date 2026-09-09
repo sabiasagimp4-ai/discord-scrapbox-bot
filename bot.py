@@ -40,7 +40,6 @@ REQUIRED_ENV_VARS = ('DISCORD_TOKEN', 'CHANNEL_ID', 'SCRAPBOX_PROJECT', 'SCRAPBO
 
 TOKEN = os.environ.get('DISCORD_TOKEN', '')
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID') or '0')
-KEYWORD = os.environ.get('KEYWORD', '')
 SCRAPBOX_PROJECT = os.environ.get('SCRAPBOX_PROJECT', '')
 SCRAPBOX_SID = os.environ.get('SCRAPBOX_SID', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
@@ -1865,14 +1864,12 @@ async def on_message(message):
     if message.channel.id != CHANNEL_ID:
         print(f'[skip] channel mismatch: {message.channel.id} != {CHANNEL_ID}')
         return
-    if KEYWORD and KEYWORD not in message.content:
-        print(f'[skip] keyword not found: {KEYWORD!r}')
-        return
-
+    # キーワードは不要。URLを含むメッセージだけを保存対象とし、それ以外の雑談には
+    # 何も返さない（キーワードが無い分、全メッセージにエラー返信すると邪魔になるため）
     urls = await asyncio.to_thread(expand_urls, re.findall(r'https?://[^\s<>"]+', message.content))
     print(f'[urls] {urls}')
     if not urls:
-        await message.reply('URLが見つかりませんでした')
+        print('[skip] no url in message')
         return
     results, embeds = await asyncio.to_thread(process_urls, urls, actor=message.author.display_name)
     await message.reply(content='\n'.join(results) or None, embeds=embeds[:10])
