@@ -1,6 +1,9 @@
 import asyncio
 import json
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -829,6 +832,12 @@ class DiaryWebhookRequestTests(unittest.TestCase):
         status, payload = bot.handle_diary_webhook_request('secret-token', b'not json')
         self.assertEqual(status, 400)
 
+    def test_non_object_or_non_string_text_returns_400(self):
+        for data in ([], {'text': 123}):
+            with self.subTest(data=data):
+                status, _ = bot.handle_diary_webhook_request('secret-token', json.dumps(data).encode())
+                self.assertEqual(status, 400)
+
     def test_empty_text_returns_400(self):
         status, payload = bot.handle_diary_webhook_request('secret-token', b'{"text": "  "}')
         self.assertEqual(status, 400)
@@ -859,6 +868,86 @@ class DiaryWebhookRequestTests(unittest.TestCase):
                 patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')) as mock_append:
             bot.handle_diary_webhook_request('secret-token', body)
         mock_append.assert_called_once_with('diary-proj', 'sid', '[Blender]を触った', 'diary')
+
+    def test_page_prefix_creates_page_and_links_from_today(self):
+        body = json.dumps({'text': 'ページ:構図メモ\nBlenderの参考'}).encode('utf-8')
+        with patch.object(bot, 'autolink_diary_text', return_value='[Blender]の参考'), \
+                patch.object(bot.diary, 'create_page', return_value=('created', '構図メモ')) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')) as mock_append:
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {
+            'status': 'created', 'title': '構図メモ', 'section': 'page',
+            'url': 'https://scrapbox.io/diary-proj/%E6%A7%8B%E5%9B%B3%E3%83%A1%E3%83%A2',
+        })
+        mock_create.assert_called_once_with('diary-proj', 'sid', '構図メモ', ['[Blender]の参考'])
+        mock_append.assert_called_once_with('diary-proj', 'sid', '[構図メモ]', 'diary')
+
+    def test_full_width_page_prefix_appends_to_existing_page(self):
+        body = json.dumps({'text': 'ページ：MV [Official]\n追記'}).encode('utf-8')
+        with patch.object(bot.diary, 'create_page', return_value=('appended', 'MV (Official)')) as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry', return_value=('appended', '2026-07-07')):
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['status'], 'appended')
+        self.assertEqual(payload['section'], 'page')
+        self.assertEqual(mock_create.call_args.args[2:], ('MV (Official)', ['追記']))
+
+    def test_page_without_title_does_not_write(self):
+        body = json.dumps({'text': 'ページ:  \n本文'}).encode('utf-8')
+        with patch.object(bot.diary, 'create_page') as mock_create, \
+                patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(status, 400)
+        self.assertIn('error', payload)
+        mock_create.assert_not_called()
+        mock_append.assert_not_called()
+
+    def test_page_save_failure_skips_link(self):
+        body = json.dumps({'text': 'ページ:構図メモ'}).encode('utf-8')
+        with patch.object(bot.diary, 'create_page', return_value=(500, '構図メモ')), \
+                patch.object(bot.diary, 'append_diary_entry') as mock_append:
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(status, 502)
+        self.assertIn('error', payload)
+        mock_append.assert_not_called()
+
+    def test_link_failure_reports_that_page_was_saved(self):
+        body = json.dumps({'text': 'ページ:構図メモ'}).encode('utf-8')
+        with patch.object(bot.diary, 'create_page', return_value=('created', '構図メモ')), \
+                patch.object(bot.diary, 'append_diary_entry', return_value=(500, '2026-07-07')):
+            status, payload = bot.handle_diary_webhook_request('secret-token', body)
+        self.assertEqual(status, 502)
+        self.assertEqual(payload['status'], 'partial')
+        self.assertIn('保存されました', payload['error'])
+        self.assertIn('構図メモ', payload['title'])
+        self.assertTrue(payload['url'].startswith('https://scrapbox.io/diary-proj/'))
+
+    def test_simultaneous_webhook_writes_are_serialized(self):
+        active = 0
+        peak = 0
+        state_lock = threading.Lock()
+        ready = threading.Barrier(2)
+
+        def fake_append(*args):
+            nonlocal active, peak
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+            return 'appended', '2026-07-07'
+
+        def send(_):
+            ready.wait(timeout=5)
+            return bot.handle_diary_webhook_request('secret-token', b'{"text":"test"}')
+
+        with patch.object(bot.diary, 'append_diary_entry', side_effect=fake_append), \
+                ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(send, range(2)))
+        self.assertEqual([status for status, _ in results], [200, 200])
+        self.assertEqual(peak, 1)
 
 
 class EnvHourTests(unittest.TestCase):
