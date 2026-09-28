@@ -137,6 +137,19 @@ JST = timezone(timedelta(hours=9))
 # 日記DMの追記を1件ずつ直列化する。連続でDMを送った際に、fetch→appendの間に
 # 別のDMの書き込みが割り込んで内容が消える（同時編集による喪失）のを防ぐ。
 _diary_dm_lock = asyncio.Lock()
+# HTTP Webhookは別スレッドで動く。DMと同じ日記ページを同時に読み書きして
+# 片方の追記を上書きしないよう、Scrapboxへの書き込み全体を直列化する。
+_diary_write_lock = threading.Lock()
+
+
+def _append_diary_entry_locked(project, sid, text, section):
+    with _diary_write_lock:
+        return diary.append_diary_entry(project, sid, text, section)
+
+
+def _create_diary_page_locked(project, sid):
+    with _diary_write_lock:
+        return diary.create_diary_page(project, sid)
 
 # --- 反証可能性（observability）用の状態 ---
 # 「通知は動いている」「最新コードが動いている」をいつでも検証できるようにする。
@@ -922,7 +935,7 @@ async def create_daily_diary_page_task():
     """個人の日記ページ（Karureの共有プロジェクトとは別のScrapboxプロジェクト）を
     日付タイトル・雛形付きで自動作成する。Discordへの通知は行わない（裏で完結する）。"""
     try:
-        status, title = await asyncio.to_thread(diary.create_diary_page, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
+        status, title = await asyncio.to_thread(_create_diary_page_locked, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID)
         if status in ('created', 'exists'):
             _mark_task_run('日記ページ作成', True, f'{status}: {title}')
         else:
@@ -1753,33 +1766,41 @@ def build_page_body_lines(body_text, image_lines):
     return lines + image_lines
 
 
+def _create_diary_side_page_sync(title, body_text, image_lines):
+    """ページ作成と日記からのリンク追記を一つのロック内で行う。
+    戻り値の第三要素はページ本体の保存成否（リンクだけ失敗した場合の案内用）。"""
+    title = _normalize_title(title)
+    if not title:
+        record_error('diary_page', '「ページ:」に続くページ名が空でした')
+        return 'no-title', '', False
+
+    with _diary_write_lock:
+        body_text = autolink_diary_text(body_text)
+        body_lines = build_page_body_lines(body_text, image_lines)
+        status, title = diary.create_page(
+            DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, title, body_lines
+        )
+        if status not in ('created', 'appended'):
+            return status, title, False
+
+        # 新しいページ名を次回の自動リンク対象にする。
+        _diary_pages_cache['ts'] = 0.0
+        link_status, _ = diary.append_diary_entry(
+            DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, f'[{title}]', 'diary'
+        )
+        if link_status != 'appended':
+            record_error('diary_page', f'{title} は保存しましたが、日記からのリンク追記に失敗しました（ステータス:{link_status}）')
+            return link_status, title, True
+        return status, title, True
+
+
 async def create_diary_side_page(title, body_text, image_lines):
     """日記プロジェクトに任意タイトルのページを作り、その日の日記からリンクする。
     リンクを張らないとどこからも辿れないページになるため、作成と同時に【日記】欄へ
     [タイトル] を1行追記する（日記が索引として機能する形を保つ）。
     戻り値: (status, title) — status は diary.create_page と同じ。
     日記へのリンク追記に失敗した場合はページ自体は残るが、成否は失敗として返す。"""
-    title = _normalize_title(title)
-    if not title:
-        record_error('diary_dm', '「ページ:」に続くページ名が空でした')
-        return 'no-title', ''
-
-    body_text = await asyncio.to_thread(autolink_diary_text, body_text)
-    body_lines = build_page_body_lines(body_text, image_lines)
-    status, title = await asyncio.to_thread(
-        diary.create_page, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, title, body_lines
-    )
-    if status not in ('created', 'appended'):
-        return status, title
-
-    # 作ったばかりのページを本文中の自動リンク対象にするため、一覧を取り直させる
-    _diary_pages_cache['ts'] = 0.0
-    link_status, _ = await asyncio.to_thread(
-        diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, f'[{title}]', 'diary'
-    )
-    if link_status != 'appended':
-        record_error('diary_dm', f'{title} は作成しましたが、日記からのリンク追記に失敗しました（ステータス:{link_status}）')
-        return link_status, title
+    status, title, _ = await asyncio.to_thread(_create_diary_side_page_sync, title, body_text, image_lines)
     return status, title
 
 
@@ -1833,7 +1854,7 @@ async def handle_diary_dm(message):
                     body = await asyncio.to_thread(autolink_diary_text, body)
                 try:
                     status, title = await asyncio.to_thread(
-                        diary.append_diary_entry, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
+                        _append_diary_entry_locked, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section
                     )
                 except Exception as e:
                     record_error('diary_dm', e)
@@ -1943,8 +1964,8 @@ async def handle_reaction_ask(message, reactor_id):
 
 def handle_diary_webhook_request(token, raw_body):
     """iOSショートカット等からのWebhook POSTを処理する（Discordを介さない日記追記経路）。
-    DMでの追記（handle_diary_dm）と同じ diary.classify_entry / append_diary_entry を
-    再利用するため、「単語:」プレフィックスの挙動も共通。
+    「ページ:」は独立ページを作り日記からリンクする。通常の本文と「単語:」は
+    DMと同じ欄へ追記する。
     戻り値: (http_status, response_dict)
     """
     if not (DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_WEBHOOK_TOKEN):
@@ -1955,14 +1976,32 @@ def handle_diary_webhook_request(token, raw_body):
         data = json.loads(raw_body or b'{}')
     except Exception:
         return 400, {'error': 'JSONの形式が不正です'}
-    text = (data.get('text') or '').strip()
+    if not isinstance(data, dict) or not isinstance(data.get('text'), str):
+        return 400, {'error': 'text は文字列で指定してください'}
+    text = data['text'].strip()
     if not text:
         return 400, {'error': 'text が空です'}
+
+    page_title, page_body = diary.parse_page_entry(text)
+    if page_title is not None:
+        status, title, page_saved = _create_diary_side_page_sync(page_title, page_body, [])
+        if status == 'no-title':
+            return 400, {'error': '「ページ:」に続くページ名を入力してください'}
+        page_url = f'https://scrapbox.io/{DIARY_SCRAPBOX_PROJECT}/{requests.utils.quote(title)}'
+        if status in ('created', 'appended'):
+            return 200, {'status': status, 'title': title, 'section': 'page', 'url': page_url}
+        if page_saved:
+            return 502, {
+                'status': 'partial', 'title': title, 'section': 'page', 'url': page_url,
+                'error': 'ページは保存されましたが、今日の日記からのリンク追加に失敗しました',
+            }
+        record_error('diary_webhook', f'{title} のページ保存失敗（ステータス:{status}）')
+        return 502, {'error': f'ページの保存に失敗しました（ステータス:{status}）'}
 
     section, body = diary.classify_entry(text)
     if section == 'diary':
         body = autolink_diary_text(body)
-    status, title = diary.append_diary_entry(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section)
+    status, title = _append_diary_entry_locked(DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID, body, section)
     if status == 'appended':
         return 200, {'status': 'appended', 'title': title, 'section': section}
     record_error('diary_webhook', f'{title} への追記失敗（ステータス:{status}）')
