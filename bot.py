@@ -985,8 +985,9 @@ async def on_ready():
         await tree.sync(guild=guild)
     else:
         await tree.sync()
-    if not send_daily_random_article.is_running():
-        send_daily_random_article.start()
+    # 日次ランダム記事の自動投稿は無効化中
+    # if not send_daily_random_article.is_running():
+    #     send_daily_random_article.start()
     if not daily_health_check.is_running():
         daily_health_check.start()
     if not notify_new_pages.is_running():
