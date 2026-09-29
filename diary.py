@@ -43,6 +43,11 @@ DIARY_PROMPTS = (
     '最近くり返し考えていることはありますか？',
 )
 
+# 朝の振り返りDMで読み返す日記の「今日からの経過日数」。日記の抜粋と単語の復習の両方に使う。
+RECALL_DAYS = (7, 30)
+
+_BRACKET_RE = re.compile(r'\[([^\[\]]+)\]')
+
 
 def diary_title_for(dt):
     """日記ページのタイトル（YYYY-MM-DD形式）を返す"""
@@ -52,7 +57,7 @@ def diary_title_for(dt):
 def build_template(dt):
     """日記ページの雛形（タイトル行は除く）を組み立てる。
     タイトル（日付）の直下に #日記 タグを付け、「日記」ページの逆リンクが
-    全日記ページの一覧として機能するようにする（Karureの #Karure制作 と同じ仕組み）。
+    全日記ページの一覧として機能するようにする。
     続けて前日・翌日ページへのナビゲーションリンクを含む。月末・年末・うるう年の
     境界は timedelta による日付演算に任せることで自前の分岐なしに正しく処理する。
     内容を変えたい場合はここを編集する。"""
@@ -247,6 +252,72 @@ def check_diary_written(project, sid, dt=None):
     if not ok:
         return None, title
     return ('written' if has_entries(body_lines) else 'empty'), title
+
+
+def split_sections(body_lines):
+    """日記本文を欄ごとの記入行に分ける。戻り値: {'vocab': [...], 'diary': [...]}
+    見出しより前に手で書かれた行は【日記】欄の内容として扱う。"""
+    sections = {'vocab': [], 'diary': []}
+    current = 'diary'
+    for line in body_lines:
+        stripped = line.strip()
+        if stripped == VOCAB_HEADING:
+            current = 'vocab'
+        elif stripped == DIARY_HEADING:
+            current = 'diary'
+        elif is_entry_line(line):
+            sections[current].append(line)
+    return sections
+
+
+def vocab_words(lines):
+    """単語欄の行から単語を取り出す（追記時に付けたリンク記法 [ ] は外す）"""
+    words = []
+    for line in lines:
+        stripped = line.strip()
+        match = _BRACKET_RE.fullmatch(stripped)
+        words.append(match.group(1) if match else stripped)
+    return words
+
+
+def plain_text(line):
+    """Scrapbox記法の1行をDMで読みやすい文字列にする。
+    リンクは括弧を外し、Gyazo画像は📷に、その他のURLは埋め込みが出ないよう <> で囲む。"""
+    def replace(match):
+        inner = match.group(1)
+        if inner.startswith(('http://', 'https://')):
+            return '📷' if 'gyazo.com' in inner else f'<{inner}>'
+        return inner.lstrip('*-/ ') or inner
+    return _BRACKET_RE.sub(replace, line.strip())
+
+
+def collect_recall(project, sid, dt=None):
+    """朝の振り返りDMの材料を集める（RECALL_DAYS 日前の日記ページが対象）。
+    戻り値: (ok, memories, words)
+      memories: [(表示名, タイトル, 日記欄の行リスト)] — 日記欄に記入がある日だけ
+      words: [(表示名, タイトル, 単語)]
+      ok=False はページ一覧か本文の取得に失敗したことを示す（一部が欠けたまま送ると
+      「その日は何も書いていない」と誤解させるため、呼び出し側で送信を見送る）。"""
+    dt = dt or datetime.now(JST)
+    ok, titles = name_linker.fetch_all_page_titles(project, sid)
+    if not ok:
+        return False, [], []
+    existing = set(titles)
+
+    memories, words = [], []
+    for days in RECALL_DAYS:
+        label = f'{days}日前'
+        title = diary_title_for(dt - timedelta(days=days))
+        if title not in existing:
+            continue
+        fetched, body_lines = fetch_body_lines(project, sid, title)
+        if not fetched:
+            return False, [], []
+        sections = split_sections(body_lines)
+        if sections['diary']:
+            memories.append((label, title, sections['diary']))
+        words += [(label, title, word) for word in vocab_words(sections['vocab'])]
+    return True, memories, words
 
 
 def append_diary_entry(project, sid, text, section='diary', dt=None):

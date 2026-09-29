@@ -27,7 +27,7 @@ class DiaryTitleForTests(unittest.TestCase):
 class BuildTemplateTests(unittest.TestCase):
     def test_tag_line_is_first(self):
         # タイトル（日付）の直下に #日記 タグを置く。「日記」ページの逆リンクが
-        # 全日記ページの一覧として機能する（Karureの #Karure制作 と同じ仕組み）
+        # 全日記ページの一覧として機能する
         lines = diary.build_template(NOW)
         self.assertEqual(lines[0], '#日記')
 
@@ -400,6 +400,87 @@ class LinkablePageTitlesTests(unittest.TestCase):
     def test_keeps_pages_that_merely_contain_a_date(self):
         titles = diary.linkable_page_titles(['2026-07-06の展示'])
         self.assertEqual(titles, ['2026-07-06の展示'])
+
+
+class SplitSectionsTests(unittest.TestCase):
+    def test_splits_vocab_and_diary(self):
+        body = diary.build_template(NOW)
+        body.insert(body.index(diary.DIARY_HEADING), ' [serendipity]')
+        body.append(' 展示に行った')
+        self.assertEqual(
+            diary.split_sections(body),
+            {'vocab': [' [serendipity]'], 'diary': [' 展示に行った']},
+        )
+
+    def test_template_only_is_empty(self):
+        self.assertEqual(diary.split_sections(diary.build_template(NOW)), {'vocab': [], 'diary': []})
+
+    def test_lines_without_headings_count_as_diary(self):
+        self.assertEqual(diary.split_sections(['#日記', '手書きの本文']), {'vocab': [], 'diary': ['手書きの本文']})
+
+
+class VocabWordsTests(unittest.TestCase):
+    def test_strips_link_brackets(self):
+        self.assertEqual(diary.vocab_words([' [serendipity]', ' 素の単語']), ['serendipity', '素の単語'])
+
+
+class PlainTextTests(unittest.TestCase):
+    def test_unwraps_page_links(self):
+        self.assertEqual(diary.plain_text(' 今日は[Blender Guru]を見た'), '今日はBlender Guruを見た')
+
+    def test_gyazo_image_becomes_camera(self):
+        self.assertEqual(diary.plain_text('  [https://i.gyazo.com/abc.jpg]'), '📷')
+
+    def test_other_urls_suppress_embeds(self):
+        self.assertEqual(diary.plain_text('[https://example.com]'), '<https://example.com>')
+
+    def test_decoration_is_removed(self):
+        self.assertEqual(diary.plain_text('[* 大事]'), '大事')
+
+
+class CollectRecallTests(unittest.TestCase):
+    TODAY = datetime(2026, 9, 29, 8, 0, tzinfo=diary.JST)
+
+    def _run(self, pages, titles=None, fetch_ok=True):
+        def fake_fetch(project, sid, title):
+            return (fetch_ok, pages.get(title, []))
+        with patch('diary.name_linker.fetch_all_page_titles', return_value=(True, titles or list(pages))), \
+                patch.object(diary, 'fetch_body_lines', side_effect=fake_fetch) as mock_fetch:
+            result = diary.collect_recall('p', 'sid', self.TODAY)
+        return result, mock_fetch
+
+    def test_collects_memories_and_words(self):
+        pages = {
+            '2026-09-22': ['#日記', diary.VOCAB_HEADING, ' [ephemeral]', diary.DIARY_HEADING, ' 7日前の出来事'],
+            '2026-08-30': ['#日記', diary.VOCAB_HEADING, ' [serendipity]', diary.DIARY_HEADING],
+        }
+        (ok, memories, words), _ = self._run(pages)
+        self.assertTrue(ok)
+        self.assertEqual(memories, [('7日前', '2026-09-22', [' 7日前の出来事'])])
+        self.assertEqual(words, [
+            ('7日前', '2026-09-22', 'ephemeral'),
+            ('30日前', '2026-08-30', 'serendipity'),
+        ])
+
+    def test_other_days_are_ignored(self):
+        # 昨日・1年前などは対象外。存在しないページも取りに行かない
+        pages = {'2026-09-28': [' 昨日'], '2025-09-29': [' 1年前'], '2026-09-22': []}
+        (_, memories, words), mock_fetch = self._run(pages)
+        mock_fetch.assert_called_once_with('p', 'sid', '2026-09-22')
+        self.assertEqual((memories, words), ([], []))
+
+    def test_template_only_day_is_not_a_memory(self):
+        (ok, memories, words), _ = self._run({'2026-09-22': diary.build_template(self.TODAY)})
+        self.assertEqual((ok, memories, words), (True, [], []))
+
+    def test_page_list_failure(self):
+        with patch('diary.name_linker.fetch_all_page_titles', return_value=(False, [])):
+            self.assertEqual(diary.collect_recall('p', 'sid', self.TODAY), (False, [], []))
+
+    def test_body_fetch_failure(self):
+        # 一部だけ欠けた内容で送ると「その日は書いていない」と誤解させる
+        (ok, memories, words), _ = self._run({'2026-09-22': []}, fetch_ok=False)
+        self.assertEqual((ok, memories, words), (False, [], []))
 
 
 if __name__ == '__main__':
