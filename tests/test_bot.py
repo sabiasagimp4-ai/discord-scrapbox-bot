@@ -715,18 +715,6 @@ class NoteInsertIndexTests(unittest.TestCase):
         self.assertEqual(bot._note_insert_index(body), 1)
 
 
-class ProjectPageTemplateTests(unittest.TestCase):
-    def test_template_has_expected_sections(self):
-        joined = '\n'.join(bot.PROJECT_PAGE_TEMPLATE)
-        self.assertIn('[* 概要]', joined)
-        self.assertIn('[* データ]', joined)
-        self.assertIn('[* メモ・感想]', joined)
-
-    def test_template_has_common_karure_link(self):
-        # 全案件ページ共通のリンク。「Karure制作」ページの逆リンク一覧が案件一覧として機能する
-        self.assertEqual(bot.PROJECT_PAGE_TEMPLATE[-1], '#Karure制作')
-
-
 class ObservabilityTests(unittest.TestCase):
     def test_format_uptime_days(self):
         self.assertEqual(bot._format_uptime(90000), '1日1時間')
@@ -1286,9 +1274,9 @@ class MorningRecallMessageTests(unittest.TestCase):
 
     def test_includes_memory_excerpt_and_link(self):
         message = bot.build_morning_recall_message(
-            'my-diary', [('1年前', '2025-09-29', [' 展示に行った', '  [https://i.gyazo.com/a.jpg]'])], []
+            'my-diary', [('7日前', '2026-09-22', [' 展示に行った', '  [https://i.gyazo.com/a.jpg]'])], []
         )
-        self.assertIn('**1年前の今日** [2025-09-29](<https://scrapbox.io/my-diary/2025-09-29>)', message)
+        self.assertIn('**7日前の日記** [2026-09-22](<https://scrapbox.io/my-diary/2026-09-22>)', message)
         self.assertIn('> 展示に行った', message)
         self.assertIn('> 📷', message)
         self.assertNotIn('単語の復習', message)
@@ -1301,8 +1289,8 @@ class MorningRecallMessageTests(unittest.TestCase):
         self.assertIn('…ほか3行', message)
 
     def test_lists_words_with_links(self):
-        message = bot.build_morning_recall_message('my-diary', [], [('昨日', '2026-09-28', 'serendipity')])
-        self.assertIn('・[serendipity](<https://scrapbox.io/my-diary/serendipity>)（昨日）', message)
+        message = bot.build_morning_recall_message('my-diary', [], [('7日前', '2026-09-22', 'serendipity')])
+        self.assertIn('・[serendipity](<https://scrapbox.io/my-diary/serendipity>)（7日前）', message)
 
     def test_stays_within_discord_limit(self):
         memories = [(f'{n}年前', f'20{n:02d}-09-29', ['あ' * 200] * 5) for n in range(1, 11)]
@@ -1347,7 +1335,7 @@ class MorningRecallTaskTests(unittest.TestCase):
 
     def test_dm_failure_is_recorded_not_raised(self):
         self.user.send.side_effect = Exception('DMを送れません')
-        self._run((True, [], [('昨日', '2026-09-28', 'serendipity')]))
+        self._run((True, [], [('7日前', '2026-09-22', 'serendipity')]))
         self.assertFalse(bot._task_last_runs['朝の振り返り']['ok'])
 
 

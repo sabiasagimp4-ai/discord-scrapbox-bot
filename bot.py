@@ -15,7 +15,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 import audit_log
-import channel_links
 import credit_extractor
 import diary
 from eagle_import import EagleImportStore
@@ -131,10 +130,6 @@ _ask_threads = {}
 # リアクションによる操作。📚系でメッセージ内URLを保存、❓系でメッセージ内容をaskに問い合わせ。
 SAVE_REACTION_EMOJIS = {'📚', '💾', '🔖'}
 ASK_REACTION_EMOJIS = {'❓', '❔'}
-
-# チャンネル⇔案件ページの紐づけ（channel_links モジュールでScrapboxに永続化）。
-# None は「未読込」を意味し、初回参照時にScrapboxから読み込む。
-_channel_project_links = None
 
 JST = timezone(timedelta(hours=9))
 
@@ -477,26 +472,13 @@ def write_page_to_scrapbox(title, body_text, actor='', action='write'):
     return r.status_code, r.text[:300]
 
 
-# /project create で作る案件ページの雛形（タイトル行は除く）。
-# 全案件ページに共通リンク #Karure制作 を付けることで、「Karure制作」ページの
-# 逆リンク一覧がそのまま案件一覧として機能する。
-PROJECT_PAGE_TEMPLATE = [
-    '[* 概要]',
-    '',
-    '[* データ]',
-    '',
-    '[* メモ・感想]',
-    '',
-    '#Karure制作',
-]
-
 # 「#タグ」だけで構成される行（ページ末尾のタグブロック判定に使う）
 _TAG_ONLY_RE = re.compile(r'^\s*#\S+(?:\s+#\S+)*\s*$')
 
 
 def _note_insert_index(body_lines):
-    """メモの挿入位置を返す。ページ末尾の空行・タグ行ブロックの直前
-    （＝雛形なら「メモ・感想」セクションの末尾）に挿入し、タグをページ最下部に保つ。"""
+    """メモの挿入位置を返す。ページ末尾の空行・タグ行ブロックの直前に挿入し、
+    タグをページ最下部に保つ。"""
     i = len(body_lines)
     while i > 0:
         line = body_lines[i - 1]
@@ -990,7 +972,7 @@ def build_morning_recall_message(project, memories, words):
 
     parts = ['☀️ 朝の振り返り']
     for label, title, lines in memories:
-        parts.append(f'\n**{label}の今日** [{title}](<{page_url(title)}>)')
+        parts.append(f'\n**{label}の日記** [{title}](<{page_url(title)}>)')
         for line in lines[:RECALL_EXCERPT_LINES]:
             text = diary.plain_text(line)[:200]
             if text:
@@ -1010,7 +992,7 @@ def build_morning_recall_message(project, memories, words):
 
 @tasks.loop(time=dt_time(hour=DIARY_RECALL_HOUR, minute=0, tzinfo=JST))
 async def morning_recall_task():
-    """1ヶ月前・N年前の同じ日の日記と、昨日・1週間前・30日前に登録した単語を本人にDMする。
+    """7日前・30日前の日記の抜粋と、その日に登録した単語を本人にDMする。
     振り返るものが無い日は送らない。取得に失敗した日も、欠けた内容で送らず見送る。"""
     try:
         ok, memories, words = await asyncio.to_thread(
@@ -1335,28 +1317,6 @@ async def write_command(interaction: discord.Interaction):
     await interaction.response.send_modal(WriteModal())
 
 
-def _get_channel_links_sync():
-    """チャンネル⇔案件ページの紐づけを返す（未読込ならScrapboxから読む）。同期関数。"""
-    global _channel_project_links
-    if _channel_project_links is None:
-        loaded = channel_links.load_links(SCRAPBOX_PROJECT, SCRAPBOX_SID)
-        if loaded is None:
-            return {}  # 通信失敗。キャッシュは作らず次回再試行する
-        _channel_project_links = loaded
-    return _channel_project_links
-
-
-def _save_channel_links_sync(links):
-    """紐づけをScrapboxへ保存し、成功したらメモリも更新する。戻り値: 成否"""
-    global _channel_project_links
-    status, _ = channel_links.save_links(SCRAPBOX_PROJECT, SCRAPBOX_SID, links)
-    if status == 200:
-        _channel_project_links = links
-        _recently_saved_titles.add(channel_links.LINKS_PAGE_TITLE)
-        return True
-    return False
-
-
 async def _page_autocomplete(interaction: discord.Interaction, current: str):
     """既存ページタイトルの入力候補（タイポによる迷子ページ防止）。"""
     try:
@@ -1418,22 +1378,12 @@ class NoteModal(discord.ui.Modal, title='ページに追記'):
             await interaction.followup.send(_format_error_reply(status, body) + self._recovery_text())
 
 
-@tree.command(name='note', description='ページにメモ・感想を追記します（このチャンネルに紐づく案件ページには page 省略可）')
+@tree.command(name='note', description='ページにメモ・感想を追記します')
 @discord.app_commands.describe(
-    page='追記先のページ名（省略時はこのチャンネルに紐づく案件ページ）',
+    page='追記先のページ名',
     create='ページが存在しない場合に新規作成する',
 )
-async def note_command(interaction: discord.Interaction, page: str = None, create: bool = False):
-    if page is None:
-        links = await asyncio.to_thread(_get_channel_links_sync)
-        page = links.get(interaction.channel_id)
-        if not page:
-            await interaction.response.send_message(
-                'このチャンネルに紐づく案件ページがありません。`page:` でページ名を指定するか、'
-                '`/project link` でこのチャンネルに案件ページを紐づけてください。',
-                ephemeral=True,
-            )
-            return
+async def note_command(interaction: discord.Interaction, page: str, create: bool = False):
     page = _normalize_title(page)
     if not page:
         await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
@@ -1444,86 +1394,6 @@ async def note_command(interaction: discord.Interaction, page: str = None, creat
 @note_command.autocomplete('page')
 async def note_page_autocomplete(interaction: discord.Interaction, current: str):
     return await _page_autocomplete(interaction, current)
-
-
-project_group = discord.app_commands.Group(name='project', description='案件ページを管理します')
-tree.add_command(project_group)
-
-
-@project_group.command(name='create', description='案件ページを雛形付きで作成し、このチャンネルに紐づけます')
-@discord.app_commands.describe(name='案件名（ページタイトルになります）')
-async def project_create_command(interaction: discord.Interaction, name: str):
-    name = _normalize_title(name)
-    if not name:
-        await interaction.response.send_message('案件名を入力してください', ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    exists = await asyncio.to_thread(name_linker.check_page_exists, SCRAPBOX_PROJECT, SCRAPBOX_SID, name)
-    scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(name)}'
-    if exists:
-        embed = _build_result_embed(name, scrapbox_url, '', '同名のページが既に存在します。このチャンネルに紐づけるには /project link を使ってください', discord.Color.blue())
-        await interaction.followup.send(embed=embed)
-        return
-
-    status, body = await asyncio.to_thread(
-        write_page_to_scrapbox, name, '\n'.join(PROJECT_PAGE_TEMPLATE), interaction.user.display_name, 'project-create'
-    )
-    if status != 200:
-        await interaction.followup.send(_format_error_reply(status, body))
-        return
-
-    links = dict(await asyncio.to_thread(_get_channel_links_sync))
-    links[interaction.channel_id] = name
-    linked = await asyncio.to_thread(_save_channel_links_sync, links)
-    note_hint = 'このチャンネルに紐づけました。/note だけで追記できます' if linked else '作成しました（チャンネルへの紐づけ保存には失敗しました。/project link で再試行できます）'
-    embed = _build_result_embed(name, scrapbox_url, '', f'案件ページを作成しました。{note_hint}', discord.Color.green())
-    await interaction.followup.send(embed=embed)
-
-
-@project_group.command(name='link', description='既存の案件ページをこのチャンネルに紐づけます')
-@discord.app_commands.describe(page='紐づける既存ページ名')
-async def project_link_command(interaction: discord.Interaction, page: str):
-    page = _normalize_title(page)
-    if not page:
-        await interaction.response.send_message('ページ名を入力してください', ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    exists = await asyncio.to_thread(name_linker.check_page_exists, SCRAPBOX_PROJECT, SCRAPBOX_SID, page)
-    if not exists:
-        await interaction.followup.send(f'❌ ページ「{page}」が見つかりません（存在するページのみ紐づけできます）')
-        return
-
-    links = dict(await asyncio.to_thread(_get_channel_links_sync))
-    links[interaction.channel_id] = page
-    if await asyncio.to_thread(_save_channel_links_sync, links):
-        await asyncio.to_thread(_audit, 'project-link', page, interaction.user.display_name, f'channel:{interaction.channel_id}')
-        scrapbox_url = f'https://scrapbox.io/{SCRAPBOX_PROJECT}/{requests.utils.quote(page)}'
-        embed = _build_result_embed(page, scrapbox_url, '', 'このチャンネルに紐づけました。/note だけで追記できます', discord.Color.green())
-        await interaction.followup.send(embed=embed)
-    else:
-        await interaction.followup.send('❌ 紐づけの保存に失敗しました')
-
-
-@project_link_command.autocomplete('page')
-async def project_link_autocomplete(interaction: discord.Interaction, current: str):
-    return await _page_autocomplete(interaction, current)
-
-
-@project_group.command(name='unlink', description='このチャンネルと案件ページの紐づけを解除します')
-async def project_unlink_command(interaction: discord.Interaction):
-    await interaction.response.defer()
-    links = dict(await asyncio.to_thread(_get_channel_links_sync))
-    page = links.pop(interaction.channel_id, None)
-    if page is None:
-        await interaction.followup.send('このチャンネルに紐づいている案件ページはありません')
-        return
-    if await asyncio.to_thread(_save_channel_links_sync, links):
-        await asyncio.to_thread(_audit, 'project-unlink', page, interaction.user.display_name, f'channel:{interaction.channel_id}')
-        await interaction.followup.send(f'「{page}」との紐づけを解除しました')
-    else:
-        await interaction.followup.send('❌ 紐づけ解除の保存に失敗しました')
 
 
 def _clean_question(question):

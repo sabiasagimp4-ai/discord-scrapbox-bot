@@ -27,7 +27,7 @@ class DiaryTitleForTests(unittest.TestCase):
 class BuildTemplateTests(unittest.TestCase):
     def test_tag_line_is_first(self):
         # タイトル（日付）の直下に #日記 タグを置く。「日記」ページの逆リンクが
-        # 全日記ページの一覧として機能する（Karureの #Karure制作 と同じ仕組み）
+        # 全日記ページの一覧として機能する
         lines = diary.build_template(NOW)
         self.assertEqual(lines[0], '#日記')
 
@@ -402,21 +402,6 @@ class LinkablePageTitlesTests(unittest.TestCase):
         self.assertEqual(titles, ['2026-07-06の展示'])
 
 
-class ShiftMonthsTests(unittest.TestCase):
-    def test_one_month_back(self):
-        self.assertEqual(diary.shift_months(datetime(2026, 7, 6), -1), datetime(2026, 6, 6))
-
-    def test_crosses_year_boundary(self):
-        self.assertEqual(diary.shift_months(datetime(2026, 1, 15), -1), datetime(2025, 12, 15))
-
-    def test_clamps_to_month_end(self):
-        self.assertEqual(diary.shift_months(datetime(2026, 3, 31), -1), datetime(2026, 2, 28))
-
-    def test_leap_day_one_year_back(self):
-        # うるう日の1年前は2/29が無いので2/28にする
-        self.assertEqual(diary.shift_months(datetime(2028, 2, 29), -12), datetime(2027, 2, 28))
-
-
 class SplitSectionsTests(unittest.TestCase):
     def test_splits_vocab_and_diary(self):
         body = diary.build_template(NOW)
@@ -466,29 +451,26 @@ class CollectRecallTests(unittest.TestCase):
 
     def test_collects_memories_and_words(self):
         pages = {
-            '2025-09-29': ['#日記', diary.DIARY_HEADING, ' 1年前の出来事'],
-            '2026-08-29': ['#日記', diary.DIARY_HEADING, ' 1ヶ月前の出来事'],
-            '2026-09-28': ['#日記', diary.VOCAB_HEADING, ' [serendipity]', diary.DIARY_HEADING],
-            '2026-09-22': ['#日記', diary.VOCAB_HEADING, ' [ephemeral]', diary.DIARY_HEADING],
+            '2026-09-22': ['#日記', diary.VOCAB_HEADING, ' [ephemeral]', diary.DIARY_HEADING, ' 7日前の出来事'],
+            '2026-08-30': ['#日記', diary.VOCAB_HEADING, ' [serendipity]', diary.DIARY_HEADING],
         }
         (ok, memories, words), _ = self._run(pages)
         self.assertTrue(ok)
-        self.assertEqual(memories, [
-            ('1ヶ月前', '2026-08-29', [' 1ヶ月前の出来事']),
-            ('1年前', '2025-09-29', [' 1年前の出来事']),
-        ])
+        self.assertEqual(memories, [('7日前', '2026-09-22', [' 7日前の出来事'])])
         self.assertEqual(words, [
-            ('昨日', '2026-09-28', 'serendipity'),
-            ('1週間前', '2026-09-22', 'ephemeral'),
+            ('7日前', '2026-09-22', 'ephemeral'),
+            ('30日前', '2026-08-30', 'serendipity'),
         ])
 
-    def test_only_existing_pages_are_fetched(self):
-        # 存在しない年のページまで毎朝取りに行かない
-        (_, _, _), mock_fetch = self._run({'2025-09-29': []})
-        mock_fetch.assert_called_once_with('p', 'sid', '2025-09-29')
+    def test_other_days_are_ignored(self):
+        # 昨日・1年前などは対象外。存在しないページも取りに行かない
+        pages = {'2026-09-28': [' 昨日'], '2025-09-29': [' 1年前'], '2026-09-22': []}
+        (_, memories, words), mock_fetch = self._run(pages)
+        mock_fetch.assert_called_once_with('p', 'sid', '2026-09-22')
+        self.assertEqual((memories, words), ([], []))
 
     def test_template_only_day_is_not_a_memory(self):
-        (ok, memories, words), _ = self._run({'2025-09-29': diary.build_template(self.TODAY)})
+        (ok, memories, words), _ = self._run({'2026-09-22': diary.build_template(self.TODAY)})
         self.assertEqual((ok, memories, words), (True, [], []))
 
     def test_page_list_failure(self):
@@ -497,7 +479,7 @@ class CollectRecallTests(unittest.TestCase):
 
     def test_body_fetch_failure(self):
         # 一部だけ欠けた内容で送ると「その日は書いていない」と誤解させる
-        (ok, memories, words), _ = self._run({'2025-09-29': []}, fetch_ok=False)
+        (ok, memories, words), _ = self._run({'2026-09-22': []}, fetch_ok=False)
         self.assertEqual((ok, memories, words), (False, [], []))
 
 

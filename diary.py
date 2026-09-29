@@ -1,4 +1,3 @@
-import calendar
 import json
 import re
 from datetime import datetime, timezone, timedelta
@@ -44,10 +43,8 @@ DIARY_PROMPTS = (
     '最近くり返し考えていることはありますか？',
 )
 
-# 朝の振り返りDMで「N年前の今日」を何年前まで遡るか。存在しない年のページは取りに行かない。
-RECALL_MAX_YEARS = 10
-# 単語の復習に出す「登録からの経過日数」とその表示名。忘れかける頃に再び見せるよう間隔を広げる。
-VOCAB_REVIEW_DAYS = ((1, '昨日'), (7, '1週間前'), (30, '30日前'))
+# 朝の振り返りDMで読み返す日記の「今日からの経過日数」。日記の抜粋と単語の復習の両方に使う。
+RECALL_DAYS = (7, 30)
 
 _BRACKET_RE = re.compile(r'\[([^\[\]]+)\]')
 
@@ -60,7 +57,7 @@ def diary_title_for(dt):
 def build_template(dt):
     """日記ページの雛形（タイトル行は除く）を組み立てる。
     タイトル（日付）の直下に #日記 タグを付け、「日記」ページの逆リンクが
-    全日記ページの一覧として機能するようにする（Karureの #Karure制作 と同じ仕組み）。
+    全日記ページの一覧として機能するようにする。
     続けて前日・翌日ページへのナビゲーションリンクを含む。月末・年末・うるう年の
     境界は timedelta による日付演算に任せることで自前の分岐なしに正しく処理する。
     内容を変えたい場合はここを編集する。"""
@@ -257,14 +254,6 @@ def check_diary_written(project, sid, dt=None):
     return ('written' if has_entries(body_lines) else 'empty'), title
 
 
-def shift_months(dt, months):
-    """月単位でずらす。移動先の月に同じ日が無ければ月末に寄せる（3/31の1ヶ月前→2/28）。"""
-    year, month_index = divmod(dt.year * 12 + dt.month - 1 + months, 12)
-    month = month_index + 1
-    day = min(dt.day, calendar.monthrange(year, month)[1])
-    return dt.replace(year=year, month=month, day=day)
-
-
 def split_sections(body_lines):
     """日記本文を欄ごとの記入行に分ける。戻り値: {'vocab': [...], 'diary': [...]}
     見出しより前に手で書かれた行は【日記】欄の内容として扱う。"""
@@ -302,19 +291,8 @@ def plain_text(line):
     return _BRACKET_RE.sub(replace, line.strip())
 
 
-def recall_targets(dt):
-    """朝の振り返りで読み返す日記の (表示名, タイトル) を、思い出用と単語復習用に分けて返す"""
-    memories = [('1ヶ月前', diary_title_for(shift_months(dt, -1)))]
-    memories += [
-        (f'{n}年前', diary_title_for(shift_months(dt, -12 * n)))
-        for n in range(1, RECALL_MAX_YEARS + 1)
-    ]
-    vocab = [(label, diary_title_for(dt - timedelta(days=days))) for days, label in VOCAB_REVIEW_DAYS]
-    return memories, vocab
-
-
 def collect_recall(project, sid, dt=None):
-    """朝の振り返りDMの材料を集める。
+    """朝の振り返りDMの材料を集める（RECALL_DAYS 日前の日記ページが対象）。
     戻り値: (ok, memories, words)
       memories: [(表示名, タイトル, 日記欄の行リスト)] — 日記欄に記入がある日だけ
       words: [(表示名, タイトル, 単語)]
@@ -325,28 +303,20 @@ def collect_recall(project, sid, dt=None):
     if not ok:
         return False, [], []
     existing = set(titles)
-    memory_targets, vocab_targets = recall_targets(dt)
 
-    sections = {}
-    for _, title in memory_targets + vocab_targets:
-        if title not in existing or title in sections:
+    memories, words = [], []
+    for days in RECALL_DAYS:
+        label = f'{days}日前'
+        title = diary_title_for(dt - timedelta(days=days))
+        if title not in existing:
             continue
         fetched, body_lines = fetch_body_lines(project, sid, title)
         if not fetched:
             return False, [], []
-        sections[title] = split_sections(body_lines)
-
-    memories = [
-        (label, title, sections[title]['diary'])
-        for label, title in memory_targets
-        if title in sections and sections[title]['diary']
-    ]
-    words = [
-        (label, title, word)
-        for label, title in vocab_targets
-        if title in sections
-        for word in vocab_words(sections[title]['vocab'])
-    ]
+        sections = split_sections(body_lines)
+        if sections['diary']:
+            memories.append((label, title, sections['diary']))
+        words += [(label, title, word) for word in vocab_words(sections['vocab'])]
     return True, memories, words
 
 
