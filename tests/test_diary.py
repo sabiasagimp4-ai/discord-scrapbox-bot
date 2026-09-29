@@ -402,5 +402,104 @@ class LinkablePageTitlesTests(unittest.TestCase):
         self.assertEqual(titles, ['2026-07-06の展示'])
 
 
+class ShiftMonthsTests(unittest.TestCase):
+    def test_one_month_back(self):
+        self.assertEqual(diary.shift_months(datetime(2026, 7, 6), -1), datetime(2026, 6, 6))
+
+    def test_crosses_year_boundary(self):
+        self.assertEqual(diary.shift_months(datetime(2026, 1, 15), -1), datetime(2025, 12, 15))
+
+    def test_clamps_to_month_end(self):
+        self.assertEqual(diary.shift_months(datetime(2026, 3, 31), -1), datetime(2026, 2, 28))
+
+    def test_leap_day_one_year_back(self):
+        # うるう日の1年前は2/29が無いので2/28にする
+        self.assertEqual(diary.shift_months(datetime(2028, 2, 29), -12), datetime(2027, 2, 28))
+
+
+class SplitSectionsTests(unittest.TestCase):
+    def test_splits_vocab_and_diary(self):
+        body = diary.build_template(NOW)
+        body.insert(body.index(diary.DIARY_HEADING), ' [serendipity]')
+        body.append(' 展示に行った')
+        self.assertEqual(
+            diary.split_sections(body),
+            {'vocab': [' [serendipity]'], 'diary': [' 展示に行った']},
+        )
+
+    def test_template_only_is_empty(self):
+        self.assertEqual(diary.split_sections(diary.build_template(NOW)), {'vocab': [], 'diary': []})
+
+    def test_lines_without_headings_count_as_diary(self):
+        self.assertEqual(diary.split_sections(['#日記', '手書きの本文']), {'vocab': [], 'diary': ['手書きの本文']})
+
+
+class VocabWordsTests(unittest.TestCase):
+    def test_strips_link_brackets(self):
+        self.assertEqual(diary.vocab_words([' [serendipity]', ' 素の単語']), ['serendipity', '素の単語'])
+
+
+class PlainTextTests(unittest.TestCase):
+    def test_unwraps_page_links(self):
+        self.assertEqual(diary.plain_text(' 今日は[Blender Guru]を見た'), '今日はBlender Guruを見た')
+
+    def test_gyazo_image_becomes_camera(self):
+        self.assertEqual(diary.plain_text('  [https://i.gyazo.com/abc.jpg]'), '📷')
+
+    def test_other_urls_suppress_embeds(self):
+        self.assertEqual(diary.plain_text('[https://example.com]'), '<https://example.com>')
+
+    def test_decoration_is_removed(self):
+        self.assertEqual(diary.plain_text('[* 大事]'), '大事')
+
+
+class CollectRecallTests(unittest.TestCase):
+    TODAY = datetime(2026, 9, 29, 8, 0, tzinfo=diary.JST)
+
+    def _run(self, pages, titles=None, fetch_ok=True):
+        def fake_fetch(project, sid, title):
+            return (fetch_ok, pages.get(title, []))
+        with patch('diary.name_linker.fetch_all_page_titles', return_value=(True, titles or list(pages))), \
+                patch.object(diary, 'fetch_body_lines', side_effect=fake_fetch) as mock_fetch:
+            result = diary.collect_recall('p', 'sid', self.TODAY)
+        return result, mock_fetch
+
+    def test_collects_memories_and_words(self):
+        pages = {
+            '2025-09-29': ['#日記', diary.DIARY_HEADING, ' 1年前の出来事'],
+            '2026-08-29': ['#日記', diary.DIARY_HEADING, ' 1ヶ月前の出来事'],
+            '2026-09-28': ['#日記', diary.VOCAB_HEADING, ' [serendipity]', diary.DIARY_HEADING],
+            '2026-09-22': ['#日記', diary.VOCAB_HEADING, ' [ephemeral]', diary.DIARY_HEADING],
+        }
+        (ok, memories, words), _ = self._run(pages)
+        self.assertTrue(ok)
+        self.assertEqual(memories, [
+            ('1ヶ月前', '2026-08-29', [' 1ヶ月前の出来事']),
+            ('1年前', '2025-09-29', [' 1年前の出来事']),
+        ])
+        self.assertEqual(words, [
+            ('昨日', '2026-09-28', 'serendipity'),
+            ('1週間前', '2026-09-22', 'ephemeral'),
+        ])
+
+    def test_only_existing_pages_are_fetched(self):
+        # 存在しない年のページまで毎朝取りに行かない
+        (_, _, _), mock_fetch = self._run({'2025-09-29': []})
+        mock_fetch.assert_called_once_with('p', 'sid', '2025-09-29')
+
+    def test_template_only_day_is_not_a_memory(self):
+        (ok, memories, words), _ = self._run({'2025-09-29': diary.build_template(self.TODAY)})
+        self.assertEqual((ok, memories, words), (True, [], []))
+
+    def test_page_list_failure(self):
+        with patch('diary.name_linker.fetch_all_page_titles', return_value=(False, [])):
+            self.assertEqual(diary.collect_recall('p', 'sid', self.TODAY), (False, [], []))
+
+    def test_body_fetch_failure(self):
+        # 一部だけ欠けた内容で送ると「その日は書いていない」と誤解させる
+        (ok, memories, words), _ = self._run({'2025-09-29': []}, fetch_ok=False)
+        self.assertEqual((ok, memories, words), (False, [], []))
+
+
 if __name__ == '__main__':
     unittest.main()

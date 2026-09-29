@@ -93,6 +93,10 @@ def _env_hour(name, default):
 
 # 日記の書き込み催促DMを送る時刻（JSTの時。分は0固定）。
 DIARY_REMINDER_HOUR = _env_hour('DIARY_REMINDER_HOUR', 22)
+# 過去の日記と単語の復習をDMで送る時刻（JSTの時。分は0固定）。
+DIARY_RECALL_HOUR = _env_hour('DIARY_RECALL_HOUR', 8)
+# 朝の振り返りDMで、1日分の日記から抜粋する最大行数
+RECALL_EXCERPT_LINES = 5
 # 日記本文に出てくる既存ページ名を自動でリンク記法にするか。'0'で無効化できる
 # （書いたままの文章を残したい場合に、後から戻せる逃げ道を用意しておく）。
 DIARY_AUTOLINK = os.environ.get('DIARY_AUTOLINK', '1').strip() != '0'
@@ -976,6 +980,58 @@ async def diary_reminder_task():
         _mark_task_run('日記リマインド', False, e)
 
 
+def build_morning_recall_message(project, memories, words):
+    """朝の振り返りDMの本文を組み立てる。振り返るものが何も無ければ None（送らない）。"""
+    if not memories and not words:
+        return None
+
+    def page_url(title):
+        return f'https://scrapbox.io/{project}/{requests.utils.quote(title)}'
+
+    parts = ['☀️ 朝の振り返り']
+    for label, title, lines in memories:
+        parts.append(f'\n**{label}の今日** [{title}](<{page_url(title)}>)')
+        for line in lines[:RECALL_EXCERPT_LINES]:
+            text = diary.plain_text(line)[:200]
+            if text:
+                parts.append(f'> {text}')
+        if len(lines) > RECALL_EXCERPT_LINES:
+            parts.append(f'> …ほか{len(lines) - RECALL_EXCERPT_LINES}行')
+    if words:
+        parts.append('\n**単語の復習** 意味を思い出せますか？')
+        for label, _, word in words:
+            parts.append(f'・[{word}](<{page_url(word)}>)（{label}）')
+
+    text = '\n'.join(parts)
+    if len(text) > 1900:
+        text = text[:1900] + '\n…(省略)'
+    return text
+
+
+@tasks.loop(time=dt_time(hour=DIARY_RECALL_HOUR, minute=0, tzinfo=JST))
+async def morning_recall_task():
+    """1ヶ月前・N年前の同じ日の日記と、昨日・1週間前・30日前に登録した単語を本人にDMする。
+    振り返るものが無い日は送らない。取得に失敗した日も、欠けた内容で送らず見送る。"""
+    try:
+        ok, memories, words = await asyncio.to_thread(
+            diary.collect_recall, DIARY_SCRAPBOX_PROJECT, DIARY_SCRAPBOX_SID
+        )
+        if not ok:
+            record_error('morning_recall', '過去の日記を取得できませんでした（Scrapboxに接続できません）')
+            _mark_task_run('朝の振り返り', False, '過去の日記の取得に失敗')
+            return
+        message = build_morning_recall_message(DIARY_SCRAPBOX_PROJECT, memories, words)
+        if message is None:
+            _mark_task_run('朝の振り返り', True, '振り返る記入が無いため送信なし')
+            return
+        user = await _fetch_with_retry(client.get_user, client.fetch_user, DIARY_OWNER_USER_ID)
+        await user.send(message)
+        _mark_task_run('朝の振り返り', True, f'日記{len(memories)}件・単語{len(words)}件をDM')
+    except Exception as e:
+        record_error('morning_recall', e)
+        _mark_task_run('朝の振り返り', False, e)
+
+
 @client.event
 async def on_ready():
     print(f'Bot ready: {client.user}')
@@ -999,6 +1055,8 @@ async def on_ready():
     # 催促DMの宛先が要るため、DM追記と同じく DIARY_OWNER_USER_ID も揃って初めて起動する
     if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_OWNER_USER_ID and not diary_reminder_task.is_running():
         diary_reminder_task.start()
+    if DIARY_SCRAPBOX_PROJECT and DIARY_SCRAPBOX_SID and DIARY_OWNER_USER_ID and not morning_recall_task.is_running():
+        morning_recall_task.start()
 
 
 @tree.command(name='save', description='URLをScrapboxに保存します')

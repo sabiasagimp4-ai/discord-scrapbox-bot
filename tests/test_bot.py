@@ -1280,6 +1280,77 @@ class DiaryReminderTaskTests(unittest.TestCase):
         self.assertEqual(bot._task_last_runs['日記リマインド']['ok'], False)
 
 
+class MorningRecallMessageTests(unittest.TestCase):
+    def test_nothing_to_recall_returns_none(self):
+        self.assertIsNone(bot.build_morning_recall_message('my-diary', [], []))
+
+    def test_includes_memory_excerpt_and_link(self):
+        message = bot.build_morning_recall_message(
+            'my-diary', [('1年前', '2025-09-29', [' 展示に行った', '  [https://i.gyazo.com/a.jpg]'])], []
+        )
+        self.assertIn('**1年前の今日** [2025-09-29](<https://scrapbox.io/my-diary/2025-09-29>)', message)
+        self.assertIn('> 展示に行った', message)
+        self.assertIn('> 📷', message)
+        self.assertNotIn('単語の復習', message)
+
+    def test_long_memory_is_truncated(self):
+        lines = [f' {i}行目' for i in range(8)]
+        message = bot.build_morning_recall_message('my-diary', [('1年前', '2025-09-29', lines)], [])
+        self.assertIn('> 4行目', message)
+        self.assertNotIn('> 5行目', message)
+        self.assertIn('…ほか3行', message)
+
+    def test_lists_words_with_links(self):
+        message = bot.build_morning_recall_message('my-diary', [], [('昨日', '2026-09-28', 'serendipity')])
+        self.assertIn('・[serendipity](<https://scrapbox.io/my-diary/serendipity>)（昨日）', message)
+
+    def test_stays_within_discord_limit(self):
+        memories = [(f'{n}年前', f'20{n:02d}-09-29', ['あ' * 200] * 5) for n in range(1, 11)]
+        message = bot.build_morning_recall_message('my-diary', memories, [])
+        self.assertLessEqual(len(message), 2000)
+
+
+class MorningRecallTaskTests(unittest.TestCase):
+    def setUp(self):
+        for p in (
+            patch.object(bot, 'DIARY_SCRAPBOX_PROJECT', 'diary-proj'),
+            patch.object(bot, 'DIARY_SCRAPBOX_SID', 'sid'),
+            patch.object(bot, 'DIARY_OWNER_USER_ID', 123),
+        ):
+            p.start()
+        self.user = AsyncMock()
+        fake_client = MagicMock()
+        fake_client.get_user.return_value = self.user
+        patch.object(bot, 'client', fake_client).start()
+        self.addCleanup(patch.stopall)
+
+    def _run(self, recall_result):
+        with patch.object(bot.diary, 'collect_recall', return_value=recall_result) as mock_collect:
+            asyncio.run(bot.morning_recall_task.coro())
+        return mock_collect
+
+    def test_sends_dm_when_something_to_recall(self):
+        mock_collect = self._run((True, [('1年前', '2025-09-29', [' 展示'])], []))
+        mock_collect.assert_called_once_with('diary-proj', 'sid')
+        self.user.send.assert_awaited_once()
+        self.assertTrue(bot._task_last_runs['朝の振り返り']['ok'])
+
+    def test_nothing_to_recall_sends_nothing(self):
+        self._run((True, [], []))
+        self.user.send.assert_not_awaited()
+        self.assertTrue(bot._task_last_runs['朝の振り返り']['ok'])
+
+    def test_fetch_failure_sends_nothing(self):
+        self._run((False, [], []))
+        self.user.send.assert_not_awaited()
+        self.assertFalse(bot._task_last_runs['朝の振り返り']['ok'])
+
+    def test_dm_failure_is_recorded_not_raised(self):
+        self.user.send.side_effect = Exception('DMを送れません')
+        self._run((True, [], [('昨日', '2026-09-28', 'serendipity')]))
+        self.assertFalse(bot._task_last_runs['朝の振り返り']['ok'])
+
+
 class SendDiaryReminderDmTests(unittest.TestCase):
     def test_dm_is_sent_to_owner(self):
         user = AsyncMock()
